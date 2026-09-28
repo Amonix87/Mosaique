@@ -1,0 +1,40 @@
+services:
+  mosaique:
+    build: .
+    # Ou, une fois l'image publiée sur votre registre :
+    # image: mon-registre/mosaique:latest
+    container_name: mosaique
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - mosaique-data:/data
+      # Stockage séparé pour les photos du fil familial (facultatif).
+      # Par défaut, elles sont rangées dans le volume ci-dessus (data/uploads/posts).
+      # Pour les stocker ailleurs (un disque dédié aux photos, un NAS...), montez
+      # un chemin de votre choix ici et indiquez-le à MEDIA_DIR ci-dessous, par exemple :
+      #   - /mnt/nas/photos-famille:/media
+      - mosaique-media:/media
+    environment:
+      # Nécessaire si vous placez Mosaïque derrière un reverse proxy HTTPS
+      # (Nginx, Caddy, Traefik...) afin que le cookie de session soit marqué "Secure".
+      - TRUST_PROXY=1
+      # Emplacement de stockage des photos du fil familial (voir le volume ci-dessus).
+      - MEDIA_DIR=/media
+
+      # --- Notifications par e-mail (facultatif) ---
+      # Renseignez ces variables pour permettre à chacun d'activer, dans son compte,
+      # la réception de ses notifications par e-mail en plus de l'application.
+      # - SMTP_HOST=smtp.exemple.fr
+      # - SMTP_PORT=587
+      # - SMTP_USER=mosaique@exemple.fr
+      # - SMTP_PASS=votre-mot-de-passe-ou-cle-app
+      # - SMTP_FROM=Mosaïque <mosaique@exemple.fr>
+      # SMTP_SECURE=1 pour une connexion SSL/TLS directe (port 465 typiquement).
+      # - SMTP_SECURE=0
+      # Adresse publique de votre instance, utilisée pour les liens dans les e-mails.
+      # - PUBLIC_URL=https://monfamille.exemple.fr
+
+volumes:
+  mosaique-data:
+  mosaique-media:

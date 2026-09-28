@@ -1,0 +1,26 @@
+{
+  "name": "mosaique",
+  "version": "1.0.0",
+  "description": "Organisation familiale auto-hébergée pour familles recomposées",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node test/smoke.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^11.10.0",
+    "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "nodemailer": "^10.0.10",
+    "web-push": "^3.6.7"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "mailparser": "^3.9.28",
+    "smtp-server": "^3.19.13"
+  }
+}

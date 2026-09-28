@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <clipPath id="shield">
+      <path d="M256,14 L452,84 V232 C452,372 368,456 256,498 C144,456 60,372 60,232 V84 Z"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#shield)">
+    <path d="M 56.0 10.0 L 189.3 10.0 L 189.3 49.4 A 20.8 20.8 0 0 1 189.3 93.1 L 189.3 132.5 L 144.5 132.5 A 20.8 20.8 0 0 1 100.8 132.5 L 56.0 132.5 L 56.0 10.0 Z" fill="#66BB6A" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 189.3 10.0 L 322.7 10.0 L 322.7 49.4 A 20.8 20.8 0 0 1 322.7 93.1 L 322.7 132.5 L 277.9 132.5 A 20.8 20.8 0 0 0 234.1 132.5 L 189.3 132.5 L 189.3 93.1 A 20.8 20.8 0 0 0 189.3 49.4 L 189.3 10.0 Z" fill="#F39C4E" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 322.7 10.0 L 456.0 10.0 L 456.0 132.5 L 411.2 132.5 A 20.8 20.8 0 0 0 367.5 132.5 L 322.7 132.5 L 322.7 93.1 A 20.8 20.8 0 0 0 322.7 49.4 L 322.7 10.0 Z" fill="#2E6DA4" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 56.0 132.5 L 100.8 132.5 A 20.8 20.8 0 0 0 144.5 132.5 L 189.3 132.5 L 189.3 171.9 A 20.8 20.8 0 0 0 189.3 215.6 L 189.3 255.0 L 144.5 255.0 A 20.8 20.8 0 0 0 100.8 255.0 L 56.0 255.0 L 56.0 132.5 Z" fill="#F2C230" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 189.3 132.5 L 234.1 132.5 A 20.8 20.8 0 0 1 277.9 132.5 L 322.7 132.5 L 322.7 171.9 A 20.8 20.8 0 0 1 322.7 215.6 L 322.7 255.0 L 277.9 255.0 A 20.8 20.8 0 0 0 234.1 255.0 L 189.3 255.0 L 189.3 215.6 A 20.8 20.8 0 0 1 189.3 171.9 L 189.3 132.5 Z" fill="#48A9A6" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 322.7 132.5 L 367.5 132.5 A 20.8 20.8 0 0 1 411.2 132.5 L 456.0 132.5 L 456.0 255.0 L 411.2 255.0 A 20.8 20.8 0 0 0 367.5 255.0 L 322.7 255.0 L 322.7 215.6 A 20.8 20.8 0 0 0 322.7 171.9 L 322.7 132.5 Z" fill="#17A2A2" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 56.0 255.0 L 100.8 255.0 A 20.8 20.8 0 0 1 144.5 255.0 L 189.3 255.0 L 189.3 294.4 A 20.8 20.8 0 0 1 189.3 338.1 L 189.3 377.5 L 144.5 377.5 A 20.8 20.8 0 0 0 100.8 377.5 L 56.0 377.5 L 56.0 255.0 Z" fill="#5DADE2" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 189.3 255.0 L 234.1 255.0 A 20.8 20.8 0 0 1 277.9 255.0 L 322.7 255.0 L 322.7 294.4 A 20.8 20.8 0 0 1 322.7 338.1 L 322.7 377.5 L 277.9 377.5 A 20.8 20.8 0 0 0 234.1 377.5 L 189.3 377.5 L 189.3 338.1 A 20.8 20.8 0 0 0 189.3 294.4 L 189.3 255.0 Z" fill="#2E86C1" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 322.7 255.0 L 367.5 255.0 A 20.8 20.8 0 0 1 411.2 255.0 L 456.0 255.0 L 456.0 377.5 L 411.2 377.5 A 20.8 20.8 0 0 1 367.5 377.5 L 322.7 377.5 L 322.7 338.1 A 20.8 20.8 0 0 0 322.7 294.4 L 322.7 255.0 Z" fill="#4CAF50" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 56.0 377.5 L 100.8 377.5 A 20.8 20.8 0 0 1 144.5 377.5 L 189.3 377.5 L 189.3 416.9 A 20.8 20.8 0 0 1 189.3 460.6 L 189.3 500.0 L 56.0 500.0 L 56.0 377.5 Z" fill="#3D7BE0" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 189.3 377.5 L 234.1 377.5 A 20.8 20.8 0 0 1 277.9 377.5 L 322.7 377.5 L 322.7 416.9 A 20.8 20.8 0 0 1 322.7 460.6 L 322.7 500.0 L 189.3 500.0 L 189.3 460.6 A 20.8 20.8 0 0 0 189.3 416.9 L 189.3 377.5 Z" fill="#F5B041" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+<path d="M 322.7 377.5 L 367.5 377.5 A 20.8 20.8 0 0 0 411.2 377.5 L 456.0 377.5 L 456.0 500.0 L 322.7 500.0 L 322.7 460.6 A 20.8 20.8 0 0 0 322.7 416.9 L 322.7 377.5 Z" fill="#F2994A" stroke="#1B3A5C" stroke-width="4" stroke-linejoin="round"/>
+  </g>
+
+  <!-- deux figures souriantes, bras ouverts, de part et d'autre -->
+  <g fill="#7FB9E0" opacity="0.92">
+    <circle cx="196" cy="228" r="34"/>
+    <path d="M196,258 c-30,0 -34,26 -58,34 c-10,3 -14,16 -6,24 c8,8 20,6 26,-2 c10,-13 18,-18 30,-20 v54 h16 v-90 z"/>
+  </g>
+  <g fill="#F2A65A" opacity="0.92">
+    <circle cx="316" cy="228" r="34"/>
+    <path d="M316,258 c30,0 34,26 58,34 c10,3 14,16 6,24 c-8,8 -20,6 -26,-2 c-10,-13 -18,-18 -30,-20 v54 h-16 v-90 z"/>
+  </g>
+  <!-- yeux + sourire simples -->
+  <g fill="#1B3A5C" opacity="0.9">
+    <circle cx="184" cy="220" r="3.4"/><circle cx="208" cy="220" r="3.4"/>
+    <path d="M182,236 q14,12 28,0" stroke="#1B3A5C" stroke-width="3.4" fill="none" stroke-linecap="round"/>
+    <circle cx="304" cy="220" r="3.4"/><circle cx="328" cy="220" r="3.4"/>
+    <path d="M302,236 q14,12 28,0" stroke="#1B3A5C" stroke-width="3.4" fill="none" stroke-linecap="round"/>
+  </g>
+
+  <!-- figure centrale (enfant) en rouge, devant -->
+  <g fill="#D93B3B">
+    <circle cx="256" cy="300" r="32"/>
+    <path d="M256,336 c-40,0 -58,32 -58,70 v22 c0,7 5,12 12,12 h92 c7,0 12,-5 12,-12 v-22 c0,-38 -18,-70 -58,-70 z"/>
+  </g>
+
+  <path d="M256,14 L452,84 V232 C452,372 368,456 256,498 C144,456 60,372 60,232 V84 Z" fill="none" stroke="#1B3A5C" stroke-width="14" stroke-linejoin="round"/>
+</svg>

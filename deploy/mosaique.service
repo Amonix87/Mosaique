@@ -1,0 +1,31 @@
+# Exemple de service systemd pour lancer Mosaïque sans Docker.
+#
+# Installation :
+#   1. Copiez ce fichier : sudo cp deploy/mosaique.service /etc/systemd/system/
+#   2. Ajustez WorkingDirectory et User si besoin
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now mosaique
+
+[Unit]
+Description=Mosaïque — organisation familiale
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mosaique
+Environment=PORT=3000
+Environment=DATA_DIR=/opt/mosaique/data
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5
+User=mosaique
+Group=mosaique
+
+# Durcissement basique (facultatif mais recommandé)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/mosaique/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
