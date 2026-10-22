@@ -892,13 +892,14 @@ function syncEventExpense(before, after, userId) {
 }
 
 // Facture périscolaire (reçue par addon, voir applyAddonResult) → dépense partagée dans Budget,
-// une fois attribuée à la personne qui l'a payée. Partage égal entre tout le cercle (une facture de
-// cantine/garderie n'est pas rattachée à un enfant précis). Tant que ce n'est pas fait, la facture
-// reste « en attente » (voir /invoices/:id/assign) et n'entre pas dans les comptes.
+// une fois attribuée à la personne qui l'a payée. Partage égal entre tout le cercle. Si la facture a
+// été rattachée à un enfant (child_id — utile dès qu'on en suit plusieurs), la dépense créée reprend
+// le même enfant. Tant que ce n'est pas fait, la facture reste « en attente » (voir
+// /invoices/:id/assign) et n'entre pas dans les comptes.
 function createExpenseForInvoice(inv, payerId, date, userId) {
   const members = circleMemberIds(inv.circle_id);
-  const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,created_by) VALUES(?,?,?,?,?,?,?,?)')
-    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'Cantine', date, payerId, JSON.stringify(equalSplit(members)), userId);
+  const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'Cantine', date, payerId, JSON.stringify(equalSplit(members)), inv.child_id || null, userId);
   db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
   emitTo(members, { type: 'refresh', what: 'expenses' });
   return r.lastInsertRowid;
@@ -1372,19 +1373,57 @@ api.delete('/reservations/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// Factures périscolaires : rattachées à un cercle (pas à un enfant), reçues de la même façon.
+// Factures périscolaires : rattachées à un cercle, et depuis peu, facultativement, à un enfant
+// (child_id — utile dès qu'on en suit plusieurs). Une facture qu'aucun cercle n'a pu être deviné à
+// l'import (plusieurs cercles sans indication suffisante) reste sans cercle plutôt que d'être perdue
+// — seuls les administrateurs la voient et peuvent l'attribuer (voir /invoices/:id/attribute).
 api.get('/invoices', (req, res) => {
   const circles = myCircles(req.user.id);
-  if (!circles.length) return res.json([]);
-  res.json(db.prepare(`SELECT * FROM invoices WHERE circle_id IN (${placeholders(circles)}) ORDER BY date DESC, id DESC`).all(...circles));
+  const clauses = []; const params = [];
+  if (circles.length) { clauses.push(`circle_id IN (${placeholders(circles)})`); params.push(...circles); }
+  if (req.user.is_admin) clauses.push('circle_id IS NULL');
+  if (!clauses.length) return res.json([]);
+  res.json(db.prepare(`SELECT * FROM invoices WHERE ${clauses.join(' OR ')} ORDER BY date DESC, id DESC`).all(...params));
 });
 api.delete('/invoices/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
   if (!row) throw new HttpError(404, 'Introuvable.');
-  requireMember(req.user, row.circle_id);
+  if (!req.user.is_admin) requireMember(req.user, row.circle_id);
   if (row.expense_id) db.prepare('DELETE FROM expenses WHERE id=?').run(row.expense_id);
   db.prepare('DELETE FROM invoices WHERE id=?').run(row.id);
   res.json({ ok: true });
+});
+// Attribue (ou corrige) le cercle et/ou l'enfant concerné par une facture. Changer le cercle est
+// réservé aux administrateurs (ça déplace la facture d'un budget à un autre, potentiellement vers un
+// cercle dont on n'est pas soi-même membre) ; dire à quel enfant elle correspond, en revanche, est
+// ouvert à tout membre du cercle déjà attribué — comme le reste de la facture.
+api.put('/invoices/:id/attribute', (req, res) => {
+  const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
+  if (!row) throw new HttpError(404, 'Introuvable.');
+  const b = req.body || {};
+  let circleId = row.circle_id;
+  if (b.circle_id !== undefined) {
+    if (!req.user.is_admin) throw new HttpError(403, 'Seul un administrateur peut attribuer le cercle d\'une facture.');
+    if (b.circle_id === null) circleId = null;
+    else {
+      const c = db.prepare('SELECT * FROM circles WHERE id=?').get(Number(b.circle_id));
+      if (!c) throw bad('Cercle introuvable.');
+      circleId = c.id;
+    }
+  } else {
+    requireMember(req.user, row.circle_id);
+  }
+  let childId = row.child_id;
+  if (b.child_id !== undefined) {
+    if (b.child_id === null) childId = null;
+    else {
+      if (!childExists(Number(b.child_id))) throw bad('Enfant introuvable.');
+      childId = Number(b.child_id);
+    }
+  }
+  db.prepare("UPDATE invoices SET circle_id=?, child_id=?, updated_at=datetime('now') WHERE id=?").run(circleId, childId, row.id);
+  if (circleId) emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'invoices' });
+  res.json(db.prepare('SELECT * FROM invoices WHERE id=?').get(row.id));
 });
 // Attribution d'une facture en attente : à quelqu'un qui va la payer (paid=false, reste en attente,
 // réattribuable), ou qui l'a déjà payée (paid=true, crée la dépense partagée correspondante — voir
@@ -2279,7 +2318,11 @@ function upsertReservation(childId, item) {
     .run(childId, title, item.date, startTime, endTime, status, src, extId);
   return { ok: true, id: r.lastInsertRowid, updated: false };
 }
-function upsertInvoice(circleId, item) {
+// circleId peut être null (cercle pas deviné à l'import — plusieurs cercles, aucune indication
+// suffisante) : la facture est quand même enregistrée, « en attente d'attribution » (voir
+// GET /invoices et PUT /invoices/:id/attribute), plutôt que perdue silencieusement comme avant.
+// childId est facultatif (utile dès qu'on suit plusieurs enfants) et peut rester null aussi.
+function upsertInvoice(circleId, childId, item) {
   const label = item && String(item.label || '').trim().slice(0, 200);
   if (!label) return { ok: false, error: 'Libellé requis.' };
   if (!item.date || !validDate(item.date)) return { ok: false, error: 'Date invalide.' };
@@ -2293,15 +2336,17 @@ function upsertInvoice(circleId, item) {
   const status = item.status ? String(item.status).trim().slice(0, 80) : null;
   const extId = item.external_id ? String(item.external_id).slice(0, 200) : null;
   if (extId) {
-    const existing = db.prepare('SELECT id FROM invoices WHERE circle_id=? AND source=? AND external_id=?').get(circleId, src, extId);
+    const existing = circleId == null
+      ? db.prepare('SELECT id FROM invoices WHERE circle_id IS NULL AND source=? AND external_id=?').get(src, extId)
+      : db.prepare('SELECT id FROM invoices WHERE circle_id=? AND source=? AND external_id=?').get(circleId, src, extId);
     if (existing) {
       db.prepare("UPDATE invoices SET label=?, number=?, date=?, due_date=?, amount_cents=?, status=?, updated_at=datetime('now') WHERE id=?")
         .run(label, number, item.date, due, amountCents, status, existing.id);
       return { ok: true, id: existing.id, updated: true };
     }
   }
-  const r = db.prepare('INSERT INTO invoices(circle_id,label,number,date,due_date,amount_cents,status,source,external_id) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(circleId, label, number, item.date, due, amountCents, status, src, extId);
+  const r = db.prepare('INSERT INTO invoices(circle_id,child_id,label,number,date,due_date,amount_cents,status,source,external_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .run(circleId, childId, label, number, item.date, due, amountCents, status, src, extId);
   return { ok: true, id: r.lastInsertRowid, updated: false };
 }
 function checkImportToken(req, res) {
@@ -2333,7 +2378,8 @@ function applyAddonResult({ reservations = [], invoices = [], reservationsWindow
   }
   const f = invoices.map((item) => {
     const circle = resolveImportCircle(item);
-    return circle ? upsertInvoice(circle.id, item) : { ok: false, error: 'Cercle introuvable.' };
+    const child = resolveImportChild(item);
+    return upsertInvoice(circle ? circle.id : null, child ? child.id : null, item);
   });
   return { reservations: r, invoices: f };
 }
@@ -2392,8 +2438,8 @@ app.post('/import/:token/facture', (req, res) => {
   const items = Array.isArray(req.body) ? req.body : [req.body];
   const results = items.map((item) => {
     const circle = resolveImportCircle(item);
-    if (!circle) return { ok: false, error: 'Cercle introuvable.' };
-    return upsertInvoice(circle.id, item);
+    const child = resolveImportChild(item);
+    return upsertInvoice(circle ? circle.id : null, child ? child.id : null, item);
   });
   res.json({ results });
 });

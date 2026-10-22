@@ -123,18 +123,40 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
 
 /* ── Attribution d'une facture périscolaire en attente (voir Réglages → Modules complémentaires) :
    à quelqu'un qui va la payer, ou qui l'a déjà payée (ce qui la fait basculer dans l'historique
-   comme une dépense ordinaire, partagée à égalité entre les membres du cercle). ── */
+   comme une dépense ordinaire, partagée à égalité entre les membres du cercle) — et, si on en suit
+   plusieurs, à quel enfant elle correspond. ── */
 function invoiceAssignForm({ invoice, circleId, done }) {
   const members = membersOfCircle(circleId);
+  const childOptions = [opt('', 'Aucun enfant en particulier'), ...state.children.map((c) => opt(c.id, c.name))];
   formModal('Attribuer la facture', [
     { name: '_info', node: h('p', { class: 'muted' }, `${invoice.label} — ${invoice.number} · ${euro(invoice.amount_cents)}`), get: () => null },
+    ...(state.children.length ? [{ name: 'child_id', label: 'Enfant concerné (facultatif)', type: 'select', value: invoice.child_id || '', options: childOptions }] : []),
     { name: 'assigned_to', label: 'Qui règle cette facture', type: 'select', value: invoice.assigned_to || state.me.user.id, options: members.map((id) => opt(id, userName(id))) },
     { name: 'paid', label: 'Déjà payée', type: 'checkbox', value: false },
     { name: 'date', label: 'Date du paiement', type: 'date', value: today(), hint: 'Utilisée seulement si « déjà payée » est cochée.' },
   ], {
     onSubmit: async (v, close) => {
+      const childId = v.child_id ? Number(v.child_id) : null;
+      if (state.children.length && childId !== (invoice.child_id || null)) await put(`/invoices/${invoice.id}/attribute`, { child_id: childId });
       await put(`/invoices/${invoice.id}/assign`, { assigned_to: Number(v.assigned_to), paid: !!v.paid, date: v.date });
       close(); toast(v.paid ? 'Facture marquée payée' : 'Facture attribuée'); done();
+    },
+  });
+}
+
+/* ── Attribution du cercle d'une facture qu'aucun cercle n'a pu deviner à l'import (plusieurs
+   cercles existent, sans indication suffisante) — réservé aux administrateurs, voir drawUnassignedInvoices. ── */
+function invoiceCircleForm({ invoice, done }) {
+  const circleOptions = state.circles.map((c) => opt(c.id, c.mine === false ? `${c.name} (vous n'en êtes pas membre)` : c.name));
+  const childOptions = [opt('', 'Aucun enfant en particulier'), ...state.children.map((c) => opt(c.id, c.name))];
+  formModal('Attribuer un cercle', [
+    { name: '_info', node: h('p', { class: 'muted' }, `${invoice.label} — ${invoice.number} · ${euro(invoice.amount_cents)}`), get: () => null },
+    { name: 'circle_id', label: 'Cercle', type: 'select', value: circleOptions[0] ? circleOptions[0].value : '', options: circleOptions },
+    ...(state.children.length ? [{ name: 'child_id', label: 'Enfant concerné (facultatif)', type: 'select', value: invoice.child_id || '', options: childOptions }] : []),
+  ], {
+    onSubmit: async (v, close) => {
+      await put(`/invoices/${invoice.id}/attribute`, { circle_id: Number(v.circle_id), child_id: v.child_id ? Number(v.child_id) : null });
+      close(); toast('Facture attribuée à un cercle'); done();
     },
   });
 }
@@ -178,6 +200,7 @@ export async function budget(root) {
   const resetBtn = h('button', { class: 'btn small', type: 'button', onclick: () => { category = ''; period.reset(); load(); } }, 'Réinitialiser');
   const filterBar = h('div', { class: 'filter-bar' }, period.node, catSelect, resetBtn);
   const balBox = h('div', { class: 'stack' });
+  const unassignedBox = h('div', { class: 'stack' });
   const pendingBox = h('div', { class: 'stack' });
   const catBox = h('div', { class: 'stack' });
   const trendBox = h('div', { class: 'stack' });
@@ -187,7 +210,7 @@ export async function budget(root) {
   append(root, pageHead('Budget', h('div', { class: 'row gap' },
     h('button', { class: 'btn', onclick: () => settlementForm({ circleId, done: load }) }, icon('swap', 16), 'Remboursement'),
     h('button', { class: 'btn primary', onclick: () => expenseForm({ circleId, done: load }) }, icon('plus', 16), 'Dépense'))),
-    chips, filterBar, balBox, pendingBox, catBox, trendBox, recBox, listBox);
+    unassignedBox, chips, filterBar, balBox, pendingBox, catBox, trendBox, recBox, listBox);
 
   async function load() {
     [expenses, recurring, summary, invoices] = await Promise.all([get('/expenses'), get('/recurring-expenses'), get(`/expenses/summary?circle_id=${circleId}&${period.query()}`), get('/invoices')]);
@@ -196,7 +219,26 @@ export async function budget(root) {
   }
   onRefresh(['expenses', 'recurring-expenses', 'invoices'], load);
 
-  function draw() { drawBalances(); drawPendingInvoices(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
+  function draw() { drawUnassignedInvoices(); drawBalances(); drawPendingInvoices(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
+
+  // Factures reçues par addon sans cercle deviné (plusieurs cercles existent, aucune indication
+  // suffisante) : plutôt que perdues, elles restent ici en attente — visibles des seuls
+  // administrateurs, qui leur choisissent un cercle (et éventuellement un enfant). Indépendant du
+  // cercle actif ci-dessous puisqu'elles n'en ont justement pas encore.
+  function drawUnassignedInvoices() {
+    if (!state.me.user.is_admin) { mount(unassignedBox); return; }
+    const rows = invoices.filter((i) => i.circle_id == null);
+    if (!rows.length) { mount(unassignedBox); return; }
+    mount(unassignedBox, h('h2', null, 'Factures sans cercle'),
+      h('p', { class: 'muted filter-summary' }, "Reçues sans cercle deviné (plusieurs cercles existent) — à vous de choisir. Visible des administrateurs seulement."),
+      h('ul', { class: 'expense-list' }, rows.map((inv) => h('li', { class: 'expense-row' },
+        h('span', { class: 'settle-icon' }, icon('doc', 14)),
+        h('div', { class: 'expense-main' }, h('strong', null, inv.label, ` — ${inv.number}`),
+          h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '')),
+        h('strong', null, euro(inv.amount_cents)),
+        h('button', { class: 'btn small primary', onclick: () => invoiceCircleForm({ invoice: inv, done: load }) }, 'Attribuer un cercle'),
+        h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer la facture « ${inv.number} » ?`)) act(async () => { await del(`/invoices/${inv.id}`); load(); }); } }, icon('trash', 16))))));
+  }
 
   // Factures périscolaires reçues par addon (Réglages → Modules complémentaires), pas encore payées :
   // visibles ici pour qu'on les attribue à quelqu'un, mais hors des comptes tant qu'elles ne le sont pas.
@@ -206,10 +248,11 @@ export async function budget(root) {
     mount(pendingBox, h('h2', null, 'Factures en attente'),
       h('ul', { class: 'expense-list' }, rows.map((inv) => {
         const assignee = inv.assigned_to ? userName(inv.assigned_to) : null;
+        const child = inv.child_id ? childById(inv.child_id) : null;
         return h('li', { class: 'expense-row' },
           h('span', { class: 'settle-icon' }, icon('doc', 14)),
           h('div', { class: 'expense-main' }, h('strong', null, inv.label, ` — ${inv.number}`),
-            h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '', ' · ', assignee ? `à payer par ${assignee}` : 'non attribuée')),
+            h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '', child ? ` · ${child.name}` : '', ' · ', assignee ? `à payer par ${assignee}` : 'non attribuée')),
           h('strong', null, euro(inv.amount_cents)),
           assignee ? h('button', { class: 'btn small', onclick: () => act(async () => {
             await put(`/invoices/${inv.id}/assign`, { assigned_to: inv.assigned_to, paid: true, date: today() });

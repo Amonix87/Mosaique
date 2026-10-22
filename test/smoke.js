@@ -1079,8 +1079,27 @@ async function main() {
     ok(await david.del(`/api/reservations/${leoResaId}`), 403, "David (lecteur de Léo) ne peut pas supprimer sa réservation");
     ok(await bob.del(`/api/reservations/${leoResaId}`), 200, 'Bob (parent) peut supprimer une réservation de Léo');
 
-    // Plusieurs cercles existent ('Les Test' et 'Coparents') : sans précision, le cercle est ambigu.
-    assert.strictEqual((await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'x', number: 'y', date: '2026-11-01', amount: 10 })).body.results[0].error, 'Cercle introuvable.', 'facture sans cercle précisé, plusieurs cercles existants → erreur');
+    // Plusieurs cercles existent ('Les Test' et 'Coparents') : sans précision, le cercle est ambigu —
+    // la facture est quand même enregistrée (plutôt que perdue), « en attente d'attribution ».
+    const orphanBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Facture mystère', number: 'ZZZ', date: '2026-11-01', amount: 10, external_id: 'eportail-orphan' });
+    assert.strictEqual(orphanBatch.body.results[0].ok, true, 'facture sans cercle précisé, plusieurs cercles existants : tout de même enregistrée');
+    const orphanId = orphanBatch.body.results[0].id;
+    assert.ok(!(await bob.get('/api/invoices')).body.some((i) => i.id === orphanId), "un non-administrateur ne voit pas une facture sans cercle");
+    assert.ok((await alice.get('/api/invoices')).body.some((i) => i.id === orphanId), "un administrateur, lui, la voit");
+    ok(await bob.put(`/api/invoices/${orphanId}/attribute`, { circle_id: circle }), 403, "un non-administrateur ne peut pas lui attribuer de cercle");
+    const attributed = (await alice.put(`/api/invoices/${orphanId}/attribute`, { circle_id: circle, child_id: kid1 })).body;
+    assert.strictEqual(attributed.circle_id, circle, "l'administrateur lui attribue le cercle « Les Test »");
+    assert.strictEqual(attributed.child_id, kid1, 'et au passage, un enfant');
+    assert.ok((await bob.get('/api/invoices')).body.some((i) => i.id === orphanId), 'Bob (membre de ce cercle) la voit désormais comme une facture ordinaire');
+    // Une fois le cercle attribué, changer l'enfant concerné redevient une action ordinaire (tout
+    // membre du cercle), alors que le cercle lui-même reste réservé aux administrateurs.
+    const retagged = (await bob.put(`/api/invoices/${orphanId}/attribute`, { child_id: kid2 })).body;
+    assert.strictEqual(retagged.child_id, kid2, "un membre ordinaire peut changer l'enfant concerné");
+    ok(await bob.put(`/api/invoices/${orphanId}/attribute`, { circle_id: circle }), 403, 'mais toujours pas le cercle');
+    const orphanPaid = (await bob.put(`/api/invoices/${orphanId}/assign`, { assigned_to: B, paid: true, date: '2026-11-02' })).body;
+    const orphanExpense = (await bob.get('/api/expenses')).body.find((e) => e.id === orphanPaid.expense_id);
+    assert.strictEqual(orphanExpense.child_id, kid2, "l'enfant attribué à la facture se retrouve sur la dépense créée une fois payée");
+
     ok(await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine novembre', number: 'F-2026-11', date: '2026-11-01', due_date: '2026-11-30', amount: 42.5, status: 'à payer', circle: 'Famille', external_id: 'eportail-f1' }), 200, 'import facture (cercle précisé par son nom)');
     const facBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine novembre', number: 'F-2026-11', date: '2026-11-01', amount: 42.5, status: 'payée', circle_id: circle, external_id: 'eportail-f1' });
     assert.strictEqual(facBatch.body.results[0].updated, true, "l'import de facture réutilise le même external_id");

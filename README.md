@@ -254,13 +254,13 @@ Une réservation (visible par enfant, comme les devoirs) :
   "external_id": "un-identifiant-stable-cote-portail" }
 ```
 
-Une facture (rattachée à un cercle plutôt qu'à un enfant — une facture de collectivité couvre en général plusieurs enfants/prestations à la fois) :
+Une facture (rattachée à un cercle, et facultativement à un enfant — une facture de collectivité couvre en général plusieurs enfants/prestations à la fois) :
 ```json
 { "label": "Cantine novembre", "number": "F-2026-11", "date": "2026-11-01",
   "due_date": "2026-11-30", "amount": 42.50, "status": "à payer",
-  "circle": "Famille", "external_id": "un-identifiant-stable-cote-portail" }
+  "circle": "Famille", "child": "Léo", "external_id": "un-identifiant-stable-cote-portail" }
 ```
-`circle` (nom du cercle) ou `circle_id` sont facultatifs si vous n'avez qu'un seul cercle dans Mosaïque. `amount` s'exprime en euros (ou `amount_cents` directement en centimes). Comme pour les devoirs, `external_id` évite les doublons en mettant à jour l'entrée existante plutôt que d'en créer une nouvelle — c'est d'ailleurs exactement ce que font les modules eux-mêmes, en interne.
+`circle` (nom du cercle) ou `circle_id`, comme `child`/`child_id`, sont facultatifs — surtout utiles avec plusieurs cercles ou plusieurs enfants suivis ; avec un seul de chacun, Mosaïque le devine. Si le cercle ne peut pas être deviné (plusieurs cercles, aucune indication), la facture est tout de même enregistrée, « en attente d'attribution » : seuls les administrateurs la voient, dans Budget, pour lui choisir un cercle (et éventuellement un enfant) — voir plus bas. `amount` s'exprime en euros (ou `amount_cents` directement en centimes). Comme pour les devoirs, `external_id` évite les doublons en mettant à jour l'entrée existante plutôt que d'en créer une nouvelle — c'est d'ailleurs exactement ce que font les modules eux-mêmes, en interne.
 
 Les factures importées n'apparaissent pas dans École, mais directement dans **Budget**, comme des
 « factures en attente » : elles n'entrent pas encore dans les comptes (qui doit combien à qui), tant
@@ -269,6 +269,15 @@ pour l'instant (« va payer » — elle reste en attente, réattribuable), soit 
 ce qui crée aussitôt une vraie dépense partagée à égalité entre les membres du cercle et fait sortir
 la facture de la liste d'attente. Supprimer cette dépense depuis Budget (comme n'importe quelle
 dépense) la fait réapparaître en attente, toujours attribuée à la même personne.
+
+Une facture en attente peut aussi se voir attribuer un **enfant** (si vous en suivez plusieurs à
+l'école) — ouvert à tout membre du cercle, ça n'a d'effet que sur l'affichage et sur l'enfant
+rattaché à la dépense créée une fois la facture payée. Changer le **cercle** d'une facture, en
+revanche, est réservé aux administrateurs : avec plusieurs cercles (familles recomposées, garde
+partagée...), l'addon ne devine pas toujours le bon tout seul, et une facture sans cercle du tout
+(plutôt que perdue comme avant ce correctif) reste visible des administrateurs en attendant d'être
+orientée vers le bon cercle, après quoi elle se comporte comme n'importe quelle autre facture en
+attente pour ce cercle.
 
 Les réservations périscolaires (cantine, garderie, ALSH...) remontées par l'addon apparaissent dans
 École sous la forme d'un calendrier mensuel, un par enfant suivi — même principe que le planning de

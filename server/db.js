@@ -562,4 +562,39 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_holiday_notices ON holiday_notices(child_id, period_key, stage);
 `);
 
+// Une facture importée dit à quel enfant elle correspond (child_id, pour les familles avec plusieurs
+// enfants suivis) et peut rester SANS cercle (circle_id devient facultatif) : avec plusieurs cercles
+// (familles recomposées, garde partagée...), un addon ne peut pas toujours deviner le bon cercle tout
+// seul — mieux vaut la garder « en attente d'attribution » (visible des administrateurs, voir
+// GET /invoices) que de la perdre silencieusement comme avant. On reconstruit la table pour retirer
+// le NOT NULL sur circle_id (SQLite ne permet pas de l'enlever par un simple ALTER TABLE).
+const invoiceCols2 = db.prepare("PRAGMA table_info(invoices)").all();
+if (invoiceCols2.find((c) => c.name === 'circle_id')?.notnull) {
+  db.exec(`
+    CREATE TABLE invoices_new (
+      id INTEGER PRIMARY KEY,
+      circle_id INTEGER REFERENCES circles(id) ON DELETE CASCADE,
+      child_id INTEGER REFERENCES children(id) ON DELETE SET NULL,
+      label TEXT NOT NULL,
+      number TEXT NOT NULL,
+      date TEXT NOT NULL,
+      due_date TEXT,
+      amount_cents INTEGER NOT NULL,
+      status TEXT,
+      source TEXT NOT NULL DEFAULT 'eportail',
+      external_id TEXT,
+      assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      expense_id INTEGER REFERENCES expenses(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO invoices_new (id, circle_id, label, number, date, due_date, amount_cents, status, source, external_id, assigned_to, expense_id, created_at, updated_at)
+      SELECT id, circle_id, label, number, date, due_date, amount_cents, status, source, external_id, assigned_to, expense_id, created_at, updated_at FROM invoices;
+    DROP TABLE invoices;
+    ALTER TABLE invoices_new RENAME TO invoices;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_ext ON invoices(circle_id, source, external_id) WHERE external_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_invoices_circle_date ON invoices(circle_id, date);
+  `);
+}
+
 module.exports = { db, DATA_DIR, MEDIA_DIR };
