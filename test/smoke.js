@@ -1129,7 +1129,7 @@ async function main() {
     assert.strictEqual(facExpense.paid_by, C);
     assert.strictEqual(facExpense.amount_cents, 4250);
     assert.strictEqual(facExpense.date, '2026-11-05');
-    assert.strictEqual(facExpense.category, 'Cantine');
+    assert.strictEqual(facExpense.category, 'École');
     assert.deepStrictEqual(Object.keys(facExpense.split).map(Number).sort((x, y) => x - y), [A, B, C, davidId].sort((x, y) => x - y), 'partagée à égalité entre tout le cercle (facture non rattachée à un enfant)');
     ok(await bob.put(`/api/invoices/${fac1.id}/assign`, { assigned_to: B, paid: true }), 400, 'une facture déjà payée ne se réattribue plus directement (passer par Budget)');
     ok(await alice.del(`/api/expenses/${paidInv.expense_id}`), 200, 'supprimer la dépense depuis Budget');

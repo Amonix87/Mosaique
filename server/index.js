@@ -899,7 +899,7 @@ function syncEventExpense(before, after, userId) {
 function createExpenseForInvoice(inv, payerId, date, userId) {
   const members = circleMemberIds(inv.circle_id);
   const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'Cantine', date, payerId, JSON.stringify(equalSplit(members)), inv.child_id || null, userId);
+    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(equalSplit(members)), inv.child_id || null, userId);
   db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
   emitTo(members, { type: 'refresh', what: 'expenses' });
   return r.lastInsertRowid;
