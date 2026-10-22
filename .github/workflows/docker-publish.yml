@@ -9,7 +9,9 @@ on:
   workflow_dispatch: {} # permet aussi de relancer la publication manuellement depuis l'onglet Actions
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  # En minuscules : les noms d'image Docker ne tolèrent pas les majuscules, contrairement au nom
+  # du dépôt GitHub (Amonix87/Mosaique) — doit rester cohérent avec docker-compose.yml.
+  IMAGE: ghcr.io/amonix87/mosaique
 
 jobs:
   build-and-push:
