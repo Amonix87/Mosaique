@@ -15,6 +15,7 @@ module.exports = {
     { key: 'url', label: 'Adresse du portail', type: 'text', placeholder: '…' },
     { key: 'username', label: 'Identifiant', type: 'text' },
     { key: 'password', label: 'Mot de passe', type: 'password' }, // jamais renvoyé en clair au client
+    { key: 'circle', label: 'Cercle', type: 'circle' }, // affiché comme un menu déroulant des cercles existants ; la valeur enregistrée est l'id du cercle
   ],
   async sync(config) {
     // config = { url, username, password, ... } tel que renseigné dans Réglages.

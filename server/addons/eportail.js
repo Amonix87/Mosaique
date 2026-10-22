@@ -152,7 +152,7 @@ function parseAmount(s) {
   return m ? Number(m[1].replace(/\s/g, '').replace(',', '.')) : null;
 }
 
-async function fetchInvoices(client, baseUrl, circle) {
+async function fetchInvoices(client, baseUrl, circleId) {
   const items = [];
   for (let page = 0; page < 50; page++) {
     const url = `${baseUrl}/espace_facturation/historique${page ? `?page=${page}` : ''}`;
@@ -180,7 +180,7 @@ async function fetchInvoices(client, baseUrl, circle) {
         status: idx.status >= 0 ? cells[idx.status] : null,
         source: 'eportail',
         external_id: (idx.number >= 0 && cells[idx.number]) || null,
-        ...(circle ? { circle } : {}),
+        ...(circleId ? { circle_id: Number(circleId) } : {}),
       });
     }
   }
@@ -194,7 +194,7 @@ module.exports = {
     { key: 'url', label: 'Adresse du portail', type: 'text', placeholder: 'https://portail.exemple.fr/VotreCommune' },
     { key: 'username', label: 'Identifiant', type: 'text' },
     { key: 'password', label: 'Mot de passe', type: 'password' },
-    { key: 'circle', label: 'Cercle pour les factures (facultatif si un seul cercle)', type: 'text' },
+    { key: 'circle', label: 'Cercle pour les factures (facultatif si un seul cercle)', type: 'circle' },
   ],
   async sync(config) {
     const baseUrl = String(config.url || '').trim().replace(/\/+$/, '');

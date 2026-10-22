@@ -90,12 +90,16 @@ export async function reglages(root) {
       }); } },
         h('label', { class: 'check-field' }, h('input', { type: 'checkbox', name: `${a.id}_enabled`, checked: a.enabled }), h('span', null, h('strong', null, a.label))),
         a.fields.map((field) => h('label', { class: 'field' }, h('span', { class: 'field-label' }, field.label),
-          h('input', {
-            name: `${a.id}_${field.key}`, type: field.type === 'password' ? 'password' : 'text',
-            value: field.type === 'password' ? '' : (a.config[field.key] || ''),
-            placeholder: field.type === 'password' ? (a.config[field.key] ? 'Laisser vide pour ne pas changer' : '') : (field.placeholder || ''),
-            autocomplete: field.type === 'password' ? 'new-password' : 'off',
-          }))),
+          field.type === 'circle'
+            ? h('select', { name: `${a.id}_${field.key}` },
+                h('option', { value: '' }, 'Détection automatique (si un seul cercle)'),
+                state.circles.map((c) => h('option', { value: c.id, selected: String(c.id) === String(a.config[field.key] || '') }, c.name)))
+            : h('input', {
+                name: `${a.id}_${field.key}`, type: field.type === 'password' ? 'password' : 'text',
+                value: field.type === 'password' ? '' : (a.config[field.key] || ''),
+                placeholder: field.type === 'password' ? (a.config[field.key] ? 'Laisser vide pour ne pas changer' : '') : (field.placeholder || ''),
+                autocomplete: field.type === 'password' ? 'new-password' : 'off',
+              }))),
         h('div', { class: 'row gap wrap' },
           h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer'),
           a.enabled ? h('button', { class: 'btn small', type: 'button', onclick: () => act(async () => {
