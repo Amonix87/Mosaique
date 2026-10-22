@@ -1,13 +1,14 @@
 services:
   mosaique:
-    # Construit directement depuis le dépôt GitHub : pas besoin de garder un clone sur votre
-    # serveur, `docker compose build` va chercher le code lui-même à chaque fois (voir « Mettre
-    # à jour » dans le README). Remplacez #main par une autre branche ou un tag si besoin.
-    build: https://github.com/Amonix87/Mosaique.git#main
+    # Image publiée automatiquement par GitHub Actions à chaque mise à jour du dépôt
+    # (voir .github/workflows/docker-publish.yml) : mettre à jour = `docker compose pull`
+    # puis `docker compose up -d`, sans rien construire sur votre serveur.
+    image: ghcr.io/amonix87/mosaique:latest
+    # Alternative : construire directement depuis le dépôt GitHub (plus lent, mais pas besoin
+    # d'attendre que l'image se publie après un push). Remplacez #main par une autre branche/tag.
+    # build: https://github.com/Amonix87/Mosaique.git#main
     # Alternative : construire depuis un clone local déjà présent sur le serveur.
     # build: .
-    # Ou, une fois l'image publiée sur votre registre :
-    # image: mon-registre/mosaique:latest
     container_name: mosaique
     restart: unless-stopped
     ports:

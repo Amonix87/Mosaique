@@ -27,12 +27,14 @@ Tout tourne sur votre serveur : aucune donnée n'est envoyée à un tiers.
 
 Prérequis : [Docker](https://docs.docker.com/get-docker/) et Docker Compose.
 
-Téléchargez seulement `docker-compose.yml` (pas besoin de cloner tout le dépôt : il construit
-directement depuis GitHub), puis :
+Téléchargez seulement `docker-compose.yml` (pas besoin de cloner le dépôt) puis :
 
 ```bash
 docker compose up -d
 ```
+
+Par défaut, il récupère l'image déjà construite et publiée sur `ghcr.io/amonix87/mosaique` (voir
+« Mettre à jour » ci-dessous) — rien à compiler sur votre serveur.
 
 Puis ouvrez `http://votre-serveur:3000`. Le premier écran vous guide pour créer votre famille et votre compte administrateur.
 
@@ -41,14 +43,18 @@ Les données (base SQLite + fichiers envoyés) sont stockées dans un volume Doc
 ### Mettre à jour
 
 ```bash
-docker compose build --no-cache   # récupère la dernière version depuis GitHub
+docker compose pull
 docker compose up -d
 ```
 
-Si vous avez gardé un clone local et utilisez `build: .` dans votre `docker-compose.yml` (voir le
-commentaire dans le fichier), faites d'abord `git pull` avant de reconstruire. Et si vous utilisez
-une image publiée sur un registre plutôt qu'une construction depuis les sources, `docker compose
-pull` suffit.
+À chaque mise à jour poussée sur la branche `main` du dépôt, une image à jour est reconstruite et
+publiée automatiquement sur `ghcr.io/amonix87/mosaique:latest` par GitHub Actions
+(`.github/workflows/docker-publish.yml`) — `docker compose pull` suffit donc.
+
+Deux alternatives sont commentées dans `docker-compose.yml`, pour qui préfère construire soi-même
+l'image plutôt que de récupérer celle déjà publiée : directement depuis le dépôt GitHub
+(`build: https://github.com/...#main`), ou depuis un clone local existant (`build: .`, puis
+`git pull` avant chaque `docker compose build`).
 
 ## Installation sans Docker
 
