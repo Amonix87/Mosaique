@@ -499,6 +499,13 @@ async function main() {
     ok(await bob.post('/api/invites', { name: 'Eve' }), 403);
     ok(await bob.put('/api/settings', { family_name: 'Hack' }), 403);
     ok(await alice.put('/api/settings', { family_name: 'Les Test 2' }));
+    // Rappel du jeudi soir et notification « vacances réservables » (Budget/École) : réglages admin.
+    ok(await alice.put('/api/settings', { reservation_recap_hour: 24 }), 400, 'heure invalide (0-23)');
+    ok(await alice.put('/api/settings', { holiday_notice_weeks: 0 }), 400, 'au moins 1 semaine');
+    ok(await alice.put('/api/settings', { reservation_recap_hour: 20, holiday_notice_weeks: 2 }));
+    const tunedMe = (await alice.get('/api/me')).body;
+    assert.strictEqual(tunedMe.settings.reservation_recap_hour, 20);
+    assert.strictEqual(tunedMe.settings.holiday_notice_weeks, 2);
     ok(await alice.put(`/api/users/${C}/password`, { password: 'nouveaumdp1' }));
     ok(await carla.get('/api/me'), 401, 'sessions révoquées après changement du mot de passe');
     ok(await carla.post('/api/login', { email: 'carla@ex.fr', password: 'nouveaumdp1' }));

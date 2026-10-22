@@ -270,6 +270,27 @@ ce qui crée aussitôt une vraie dépense partagée à égalité entre les membr
 la facture de la liste d'attente. Supprimer cette dépense depuis Budget (comme n'importe quelle
 dépense) la fait réapparaître en attente, toujours attribuée à la même personne.
 
+Les réservations périscolaires (cantine, garderie, ALSH...) remontées par l'addon apparaissent dans
+École sous la forme d'un calendrier mensuel, un par enfant suivi — même principe que le planning de
+Garde. Chaque jour réservé affiche un petit point coloré selon le type de réservation (cantine,
+garderie matin/soir, journée complète) ; toucher un jour garni ouvre le détail (horaires, statut) et
+permet de supprimer une réservation erronée. Rien ne se saisit à la main ici : c'est une vue en
+lecture de ce que l'addon (ou l'import manuel) a déjà renvoyé.
+
+Chaque jeudi soir (19h par défaut, réglable dans Famille → Réglages), si un enfant a des réservations
+suivies, chaque parent concerné reçoit une notification récapitulant la semaine suivante : ce qui est
+déjà réservé (cantine, garderie, journée complète...) et, en creux, ce qui ne l'est pas encore — pour
+ne pas découvrir un oubli le lundi matin. Avec une garde partagée, chaque jour part au parent qui a
+l'enfant ce jour-là. Les jours de vacances scolaires sont exclus du récapitulatif.
+
+Comme le portail e-portail n'indique nulle part, de façon fiable, la date d'ouverture des réservations
+pour les prochaines vacances (ALSH), Mosaïque l'estime : une notification prévient quand les
+réservations *devraient* être ouvertes (par défaut 3 semaines avant le début des vacances, réglable),
+puis une seconde arrive une semaine plus tard si rien n'a encore été réservé pour cette période — pour
+ne pas rater la fenêtre si elle a ouvert plus tard que prévu. Ces deux réglages (heure du récapitulatif
+du jeudi, délai d'anticipation des vacances) se trouvent dans Famille → Réglages, et n'apparaissent que
+si l'intégration e-portail est activée.
+
 Un enfant peut être exclu du suivi de garde s'il n'en a pas besoin (il vit toujours au même endroit) : décochez « Concerné par une garde partagée » dans sa fiche (Famille → Enfants → Modifier). Il disparaît alors de l'onglet Garde — planning, statistiques, vacances scolaires — sans que rien d'autre ne change pour lui (agenda, contacts, budget restent inchangés). Réactivable à tout moment.
 
 Chaque attribution de garde est indépendante par enfant : toucher un jour dans la mosaïque d'un enfant ne présélectionne que lui, jamais les autres — pratique quand chaque enfant suit un rythme différent (garde partagée pour l'un, arrangement différent pour l'autre). Vous pouvez toujours cocher manuellement d'autres enfants dans la barre d'action si vous voulez appliquer la même période à plusieurs d'entre eux à la fois.

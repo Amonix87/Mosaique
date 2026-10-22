@@ -242,7 +242,7 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .tile-dow { text-align: center; font-size: .68rem; color: var(--ink-soft); }
 .tile-week { display: flex; align-items: center; justify-content: center; font-size: .62rem; color: var(--ink-soft); font-weight: 600; }
 .tile-week-head { font-size: .68rem; }
-.tile { aspect-ratio: 1; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: .78rem; cursor: pointer; }
+.tile { aspect-ratio: 1; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: .78rem; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
 .tile.ghost { border: none; background: transparent; cursor: default; }
 .tile.empty { color: var(--ink-soft); }
 .tile.filled { border-color: transparent; font-weight: 700; }
@@ -252,6 +252,15 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .legend { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; font-size: .82rem; margin-top: .4rem; }
 .legend-item { display: flex; align-items: center; gap: .35rem; }
 .swatch { width: 12px; height: 12px; border-radius: 4px; display: inline-block; }
+
+/* ── Calendrier des réservations périscolaires (École) ── */
+.cal-daynum { line-height: 1; }
+.cal-dots { display: flex; gap: 2px; justify-content: center; margin-top: 1px; }
+.cal-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--ink-soft); }
+.cal-dot.cantine { background: var(--accent); }
+.cal-dot.garderie_matin { background: var(--sea); }
+.cal-dot.garderie_soir { background: var(--ring); }
+.cal-dot.alsh { background: var(--moss); }
 .action-bar { position: sticky; bottom: 70px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: .8rem; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: .6rem; z-index: 10; }
 .action-bar[hidden] { display: none; }
 .bar-text { font-size: .92rem; }

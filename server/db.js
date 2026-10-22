@@ -548,4 +548,18 @@ if (!invoiceCols.includes('assigned_to')) {
   db.exec('ALTER TABLE invoices ADD COLUMN expense_id INTEGER REFERENCES expenses(id) ON DELETE SET NULL');
 }
 
+// Journal des notifications « vacances réservables » déjà envoyées (une ligne par enfant, période de
+// vacances et étape — ouverture estimée / rappel une semaine après), pour ne jamais en envoyer deux
+// fois pour la même période. period_key identifie la période de façon stable (ex. "Printemps-2027-04-17").
+db.exec(`
+  CREATE TABLE IF NOT EXISTS holiday_notices (
+    id INTEGER PRIMARY KEY,
+    child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    period_key TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_holiday_notices ON holiday_notices(child_id, period_key, stage);
+`);
+
 module.exports = { db, DATA_DIR, MEDIA_DIR };

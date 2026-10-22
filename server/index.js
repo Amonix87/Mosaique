@@ -243,6 +243,8 @@ function meState(u) {
       pronote_enabled: getSetting('pronote_enabled', 'false') === 'true',
       recipes_enabled: getSetting('recipes_enabled', 'false') === 'true',
       recap_hour: Number(getSetting('recap_hour', '18')),
+      reservation_recap_hour: Number(getSetting('reservation_recap_hour', '19')),
+      holiday_notice_weeks: Number(getSetting('holiday_notice_weeks', '3')),
       smtp_configured: mailer.configured(),
       public_url: mailer.publicUrl(),
       vapid_public_key: push.publicKey,
@@ -463,7 +465,7 @@ api.post('/me/ical-token', (req, res) => {
 
 /* ── Administration : réglages, membres, cercles, enfants ── */
 api.put('/settings', requireAdmin, (req, res) => {
-  const { family_name, fil_familial, messages_enabled, courses_enabled, pronote_enabled, recap_hour, recipes_enabled } = req.body || {};
+  const { family_name, fil_familial, messages_enabled, courses_enabled, pronote_enabled, recap_hour, recipes_enabled, reservation_recap_hour, holiday_notice_weeks } = req.body || {};
   if (family_name !== undefined) setSetting('family_name', String(family_name).trim().slice(0, 80) || 'Ma famille');
   if (fil_familial !== undefined) setSetting('fil_familial', fil_familial ? 'true' : 'false');
   if (messages_enabled !== undefined) setSetting('messages_enabled', messages_enabled ? 'true' : 'false');
@@ -474,6 +476,20 @@ api.put('/settings', requireAdmin, (req, res) => {
     const h = Number(recap_hour);
     if (!Number.isInteger(h) || h < 0 || h > 23) throw bad('Heure invalide.');
     setSetting('recap_hour', String(h));
+  }
+  // Rappel du jeudi soir (réservations périscolaires de la semaine suivante) : heure d'envoi.
+  if (reservation_recap_hour !== undefined) {
+    const h = Number(reservation_recap_hour);
+    if (!Number.isInteger(h) || h < 0 || h > 23) throw bad('Heure invalide.');
+    setSetting('reservation_recap_hour', String(h));
+  }
+  // Notification « vacances réservables » : combien de semaines avant le début des prochaines
+  // vacances on estime que les réservations ouvrent (le portail ne permet pas de le savoir avec
+  // certitude sans tenter une vraie réservation — voir server/addons/README.md).
+  if (holiday_notice_weeks !== undefined) {
+    const w = Number(holiday_notice_weeks);
+    if (!Number.isInteger(w) || w < 1 || w > 12) throw bad('Nombre de semaines invalide.');
+    setSetting('holiday_notice_weeks', String(w));
   }
   res.json({ ok: true });
 });
@@ -2439,6 +2455,8 @@ function tick() {
     db.prepare('DELETE FROM sessions WHERE expires_at<?').run(Date.now());
     db.prepare('DELETE FROM invites WHERE expires_at<?').run(Date.now());
     maybeSendDailyRecap();
+    maybeSendReservationRecap();
+    maybeSendHolidayNotices();
     checkEventReminders();
     generateRecurringExpenses();
     maybeSyncAddons().catch((e) => console.error('maybeSyncAddons', e));
@@ -2470,6 +2488,145 @@ function maybeSendDailyRecap() {
     }
   }
   setSetting('last_recap_date', todayStr);
+}
+
+const frDate = (d) => d.split('-').reverse().join('/');
+
+// Enfants « suivis » pour les réservations périscolaires : au moins une réservation déjà reçue un
+// jour (par un addon ou l'import manuel) — filtre commun au rappel du jeudi soir et à la notification
+// « vacances réservables » ci-dessous, pour ne jamais solliciter une famille qui n'utilise pas ça.
+function trackedReservationChildren() {
+  return db.prepare('SELECT DISTINCT child_id FROM school_reservations').all()
+    .map((r) => db.prepare('SELECT * FROM children WHERE id=?').get(r.child_id)).filter(Boolean);
+}
+// Qui prévenir pour un enfant donné (hors événement) : ses parents désignés, ou tout le monde si
+// aucun n'est désigné (même règle que la visibilité de l'enfant, voir canSeeChild).
+function childNotifyTargets(childId) {
+  const c = db.prepare('SELECT parent_ids FROM children WHERE id=?').get(childId);
+  const pids = c ? parseJ(c.parent_ids, []) : [];
+  return pids.length ? pids : db.prepare('SELECT id FROM users').all().map((u) => u.id);
+}
+// Classement sommaire d'une réservation pour la phrase de résumé ci-dessous — même logique que
+// public/js/ecole.js, dupliquée volontairement ici (petite fonction pure : pas besoin d'un module
+// partagé entre client et serveur pour ça, voir equalSplit/splitEqually pour le même choix).
+function reservationKind(r) {
+  const t = (r.title || '').toLowerCase();
+  if (/cantine|repas|dejeuner|déjeuner|midi/.test(t)) return 'cantine';
+  if (/alsh|loisirs|journee|journée/.test(t)) return 'alsh';
+  if (/garderie|accueil|periscolaire|périscolaire/.test(t)) return (r.start_time && r.start_time < '12:00') ? 'garderie_matin' : 'garderie_soir';
+  return 'autre';
+}
+
+const WEEKDAY_NAMES = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi'];
+// Les 5 jours ouvrés de la semaine suivant une date de référence (le jeudi d'envoi, concrètement).
+function nextWeekWeekdays(fromDateStr) {
+  const dow = (new Date(parseD(fromDateStr)).getUTCDay() + 6) % 7; // 0 = lundi
+  const nextMonday = addDays(fromDateStr, 7 - dow);
+  return Array.from({ length: 5 }, (_, i) => addDays(nextMonday, i));
+}
+const RESA_SENTENCE = {
+  none: "rien n'est encore réservé",
+  cantine: 'seuls les midis sont réservés (cantine)',
+  garderie: 'seule la garderie (matin et soir) est réservée, sans la cantine',
+  garderie_matin: 'seule la garderie du matin est réservée',
+  garderie_soir: 'seule la garderie du soir est réservée',
+  journee: 'tout est réservé en journée complète (cantine et garderie)',
+};
+const RESA_LIST_LABEL = {
+  none: 'rien de réservé', cantine: 'cantine', garderie: 'garderie (matin et soir)',
+  garderie_matin: 'garderie matin', garderie_soir: 'garderie soir', journee: 'journée complète (cantine et garderie)',
+};
+// Résumé en une phrase (cas simples) ou en liste jour par jour (sinon), pour un sous-ensemble de
+// jours donné — un parent ne voit que les jours où il/elle aura l'enfant la semaine prochaine.
+function summarizeReservationDays(childId, dates) {
+  const labelFor = (d) => {
+    const kinds = new Set(db.prepare('SELECT * FROM school_reservations WHERE child_id=? AND date=?').all(childId, d).map(reservationKind));
+    if (kinds.has('cantine') && (kinds.has('alsh') || (kinds.has('garderie_matin') && kinds.has('garderie_soir')))) return 'journee';
+    if (kinds.has('cantine')) return 'cantine';
+    if (kinds.has('garderie_matin') && kinds.has('garderie_soir')) return 'garderie';
+    if (kinds.has('garderie_matin')) return 'garderie_matin';
+    if (kinds.has('garderie_soir')) return 'garderie_soir';
+    return 'none';
+  };
+  const labels = dates.map(labelFor);
+  const dayName = (d) => WEEKDAY_NAMES[(new Date(parseD(d)).getUTCDay() + 6) % 7];
+  if (labels.every((l) => l === labels[0])) return `Actuellement, ${RESA_SENTENCE[labels[0]]}.`;
+  // Cas fréquent : une base de cantine la plupart des jours, avec un ou deux jours « en plus » réservés
+  // en journée complète (ex. le mercredi, sans école l'après-midi) — seul autre motif reconnu en
+  // phrase ; toute autre combinaison repart sur la liste jour par jour.
+  const base = labels.filter((l) => l === 'cantine').length;
+  const upgraded = dates.filter((d, i) => labels[i] === 'journee');
+  if (upgraded.length && base + upgraded.length === labels.length && base >= upgraded.length) {
+    return `Actuellement, les midis sont réservés, ainsi que toute la journée du ${upgraded.map(dayName).join(' et du ')}.`;
+  }
+  return dates.map((d, i) => `- ${dayName(d)} : ${RESA_LIST_LABEL[labels[i]]}`).join('\n');
+}
+
+// Rappel du jeudi soir : pour chaque enfant suivi, qui aura l'enfant chaque jour de la semaine
+// prochaine (garde alternée, jour par jour si elle change en cours de semaine), avec un résumé de ce
+// qui est déjà réservé pour ces jours-là. Les jours de vacances scolaires (zone de l'enfant) sont
+// exclus : ils ont leur propre notification (voir maybeSendHolidayNotices ci-dessous).
+function maybeSendReservationRecap() {
+  if (new Date().getDay() !== 4) return; // jeudi
+  const todayStr = nowLocal().slice(0, 10);
+  if (getSetting('last_resa_recap_date', '') === todayStr) return;
+  if (new Date().getHours() < Number(getSetting('reservation_recap_hour', '19'))) return;
+  for (const child of trackedReservationChildren()) {
+    const holidays = loadHolidays().filter((p) => p.zones.includes(child.zone));
+    const weekdays = nextWeekWeekdays(todayStr).filter((d) => !holidays.some((p) => d >= p.start && d < p.end));
+    if (!weekdays.length) continue; // toute la semaine prochaine tombe en vacances pour cet enfant
+    const byParent = {};
+    for (const d of weekdays) {
+      const night = db.prepare('SELECT parent_id FROM custody_nights WHERE child_id=? AND date=?').get(child.id, d);
+      const targets = (child.shared_custody && night) ? [night.parent_id] : childNotifyTargets(child.id);
+      for (const uid of targets) (byParent[uid] ||= []).push(d);
+    }
+    for (const [uid, dates] of Object.entries(byParent)) {
+      const body = `${child.name} — semaine du ${frDate(dates[0])} au ${frDate(dates[dates.length - 1])} :\n\n${summarizeReservationDays(child.id, dates)}\n\nPensez à réserver cantine/garderie si besoin.`;
+      notify([Number(uid)], { kind: 'reservation', title: `Réservations périscolaires : ${child.name}`, body, link: '#/ecole' });
+    }
+  }
+  setSetting('last_resa_recap_date', todayStr);
+}
+
+// Notification « vacances réservables » : le portail n'expose aucun signal fiable d'ouverture des
+// réservations (voir server/addons/README.md — vérifié en direct sur un vrai portail), donc on
+// estime la date d'ouverture à N semaines avant le début des prochaines vacances (réglable, Réglages
+// → Administration). Première notification à cette date estimée, puis un rappel une semaine après,
+// seulement si rien n'est encore réservé pour cette période (pour ne pas relancer pour rien).
+function maybeSendHolidayNotices() {
+  const weeks = Number(getSetting('holiday_notice_weeks', '3'));
+  const todayStr = nowLocal().slice(0, 10);
+  for (const child of trackedReservationChildren()) {
+    const next = loadHolidays().filter((p) => p.zones.includes(child.zone) && p.name !== 'Été' && p.start > todayStr)
+      .sort((a, b) => a.start.localeCompare(b.start))[0];
+    if (!next) continue;
+    const periodKey = `${next.name}-${next.start}`;
+    const openDate = addDays(next.start, -7 * weeks);
+    const reminderDate = addDays(openDate, 7);
+    const sent = (stage) => !!db.prepare('SELECT 1 FROM holiday_notices WHERE child_id=? AND period_key=? AND stage=?').get(child.id, periodKey, stage);
+    const markSent = (stage) => db.prepare('INSERT OR IGNORE INTO holiday_notices(child_id,period_key,stage) VALUES(?,?,?)').run(child.id, periodKey, stage);
+    const when = `du ${frDate(next.start)} au ${frDate(addDays(next.end, -1))}`;
+    if (todayStr >= openDate && !sent('opened')) {
+      notify(childNotifyTargets(child.id), {
+        kind: 'reservation', title: `Vacances de ${next.name} : pensez à réserver`,
+        body: `Les réservations pour les vacances de ${next.name} (${when}) sont probablement ouvertes — pensez à réserver cantine/garderie/ALSH pour ${child.name} si besoin.`,
+        link: '#/ecole',
+      });
+      markSent('opened');
+    }
+    if (todayStr >= reminderDate && !sent('reminded')) {
+      const already = db.prepare('SELECT 1 FROM school_reservations WHERE child_id=? AND date>=? AND date<?').get(child.id, next.start, next.end);
+      if (!already) {
+        notify(childNotifyTargets(child.id), {
+          kind: 'reservation', title: `Vacances de ${next.name} : rien n'est encore réservé`,
+          body: `Pour ${child.name}, rien n'est encore réservé pour les vacances de ${next.name} (${when}). Pensez-y si besoin.`,
+          link: '#/ecole',
+        });
+      }
+      markSent('reminded'); // qu'on ait relancé ou non : pas de 3e tentative pour cette période
+    }
+  }
 }
 
 if (require.main === module) {

@@ -177,6 +177,10 @@ export async function reglages(root) {
           pronote_enabled: e.target.elements.pronote_enabled.checked,
           recap_hour: e.target.elements.recap_hour.value,
           recipes_enabled: e.target.elements.recipes_enabled.checked,
+          ...(state.settings.pronote_enabled ? {
+            reservation_recap_hour: e.target.elements.reservation_recap_hour.value,
+            holiday_notice_weeks: e.target.elements.holiday_notice_weeks.value,
+          } : {}),
         });
         toast('Réglages enregistrés'); refresh();
       }); } },
@@ -187,6 +191,10 @@ export async function reglages(root) {
       h('label', { class: 'check-field' }, h('input', { type: 'checkbox', name: 'pronote_enabled', checked: state.settings.pronote_enabled }), h('span', null, "Activer École (devoirs et mots, via Pronote ou une autre source externe)")),
       h('label', { class: 'check-field' }, h('input', { type: 'checkbox', name: 'recipes_enabled', checked: state.settings.recipes_enabled }), h('span', null, 'Activer les recettes de cuisine')),
       h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Heure du récapitulatif quotidien par e-mail'), h('select', { name: 'recap_hour' }, Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: i === state.settings.recap_hour }, `${String(i).padStart(2, '0')}h`)))),
+      state.settings.pronote_enabled ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Heure du rappel du jeudi soir (réservations périscolaires de la semaine suivante)'), h('select', { name: 'reservation_recap_hour' }, Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: i === state.settings.reservation_recap_hour }, `${String(i).padStart(2, '0')}h`)))) : null,
+      state.settings.pronote_enabled ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Vacances réservables : notifier combien de semaines avant leur début'),
+        h('input', { type: 'number', name: 'holiday_notice_weeks', min: 1, max: 12, value: state.settings.holiday_notice_weeks }),
+        h('span', { class: 'hint' }, "Estimation seulement : le portail de réservation ne permet pas de savoir avec certitude quand les réservations ouvrent. Un rappel supplémentaire est envoyé une semaine plus tard si rien n'est encore réservé.")) : null,
       h('div', { class: 'row end' }, h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer')))));
 
       sections.push(h('section', { class: 'card' }, h('h2', null, 'Sauvegarde'),
