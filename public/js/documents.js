@@ -1,4 +1,4 @@
-import { h, icon, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, inFilter, emptyState, fmtDayY, userName, activeCircleId, circleSelectOptions, myCircles, fileSize, childById, state, mount, append, myEditableChildren, addressField, modal, periodFilter } from './core.js';
+import { h, icon, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, inFilter, inFilterIds, emptyState, fmtDayY, userName, activeCircleId, circleSelectOptions, myCircles, circleById, fileSize, childById, state, mount, append, myEditableChildren, addressField, modal, periodFilter } from './core.js';
 
 const DOC_CATS = ['Santé', 'École', 'Administratif', 'Justice', 'Autre'];
 
@@ -91,6 +91,7 @@ export async function documents(root) {
 
 function contactForm(c, done) {
   const addrField = addressField(c ? c.address || '' : '', null, null, { placeholder: 'Adresse…' });
+  const circles = myCircles();
   formModal(c ? 'Modifier le contact' : 'Nouveau contact', [
     { name: 'name', label: 'Nom', value: c ? c.name : '', required: true, maxlength: 200 },
     { name: 'category', label: 'Catégorie', value: c ? c.category || '' : '', placeholder: 'Médecin, École, Baby-sitter…' },
@@ -98,12 +99,14 @@ function contactForm(c, done) {
     { name: 'email', label: 'E-mail', value: c ? c.email || '' : '', type: 'email' },
     { name: 'address', node: h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Adresse'), addrField.input, addrField.list), get: addrField.get },
     { name: 'child_id', label: 'Concerne (facultatif)', type: 'select', value: c ? (c.child_id ?? '') : '', options: [opt('', 'Toute la famille'), ...myEditableChildren().map((k) => opt(k.id, k.name))] },
-    ...(myCircles().length > 1 ? [{ name: 'circle_id', label: 'Cercle', type: 'select', value: c ? c.circle_id : activeCircleId(), options: circleSelectOptions() }] : []),
+    ...(circles.length > 1 ? [{ name: 'circle_ids', label: 'Cercles', type: 'checkboxes', value: c ? c.circle_ids : [activeCircleId()], options: circleSelectOptions() }] : []),
+    { name: 'favorite', label: 'Favori (épinglé en haut de la liste)', type: 'checkbox', value: c ? !!c.favorite : false },
     { name: 'notes', label: 'Notes', type: 'textarea', value: c ? c.notes || '' : '' },
   ], {
     onSubmit: async (v, close) => {
-      const body = { ...v, child_id: v.child_id ? Number(v.child_id) : null, circle_id: v.circle_id ? Number(v.circle_id) : undefined };
-      if (c) await put(`/contacts/${c.id}`, body); else await post('/contacts', { ...body, circle_id: body.circle_id || activeCircleId() });
+      const body = { ...v, child_id: v.child_id ? Number(v.child_id) : null };
+      body.circle_ids = circles.length > 1 ? (v.circle_ids || []).map(Number) : [activeCircleId()];
+      if (c) await put(`/contacts/${c.id}`, body); else await post('/contacts', body);
       close(); toast(c ? 'Contact modifié' : 'Contact ajouté'); done();
     },
   });
@@ -118,17 +121,33 @@ export async function contacts(root) {
   async function load() { list = await get('/contacts'); draw(); }
   onRefresh(['contacts'], load);
 
+  function toggleFavorite(c, e) {
+    e.stopPropagation();
+    act(async () => { await put(`/contacts/${c.id}`, { favorite: !c.favorite }); });
+  }
+
+  function contactRow(c, multiCircle) {
+    const kid = c.child_id ? childById(c.child_id) : null;
+    return h('li', { class: 'contact-row', onclick: () => contactForm(c, load) },
+      h('button', { class: 'icon-btn' + (c.favorite ? ' fav-on' : ''), 'aria-label': c.favorite ? 'Retirer des favoris' : 'Mettre en favori', title: c.favorite ? 'Retirer des favoris' : 'Mettre en favori', onclick: (e) => toggleFavorite(c, e) }, icon('star', 18)),
+      h('div', { class: 'contact-main' },
+        h('strong', null, c.name), c.category ? h('span', { class: 'tag' }, c.category) : null, kid ? h('span', { class: 'tag', style: { background: kid.color } }, kid.name) : null,
+        multiCircle ? c.circle_ids.map((id) => { const circle = circleById(id); return circle ? h('span', { class: 'tag', style: { background: circle.color } }, circle.name) : null; }) : null,
+        h('div', { class: 'muted' }, [c.phone, c.email, c.address].filter(Boolean).join(' · '))),
+      c.phone ? h('a', { class: 'icon-btn', href: `tel:${c.phone}`, 'aria-label': 'Appeler', onclick: (e) => e.stopPropagation() }, icon('phone', 18)) : null,
+      h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async (e) => { e.stopPropagation(); if (await confirmBox(`Supprimer « ${c.name} » ?`)) act(async () => { await del(`/contacts/${c.id}`); load(); }); } }, icon('trash', 18)));
+  }
+
   function draw() {
-    const visible = list.filter(inFilter);
-    mount(box, visible.length ? h('ul', { class: 'contact-list' }, visible.map((c) => {
-      const kid = c.child_id ? childById(c.child_id) : null;
-      return h('li', { class: 'contact-row', onclick: () => contactForm(c, load) },
-        h('div', { class: 'contact-main' },
-          h('strong', null, c.name), c.category ? h('span', { class: 'tag' }, c.category) : null, kid ? h('span', { class: 'tag', style: { background: kid.color } }, kid.name) : null,
-          h('div', { class: 'muted' }, [c.phone, c.email, c.address].filter(Boolean).join(' · '))),
-        c.phone ? h('a', { class: 'icon-btn', href: `tel:${c.phone}`, 'aria-label': 'Appeler', onclick: (e) => e.stopPropagation() }, icon('phone', 18)) : null,
-        h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async (e) => { e.stopPropagation(); if (await confirmBox(`Supprimer « ${c.name} » ?`)) act(async () => { await del(`/contacts/${c.id}`); load(); }); } }, icon('trash', 18)));
-    })) : emptyState('Aucun contact pour le moment.'));
+    const visible = list.filter(inFilterIds);
+    const multiCircle = myCircles().length > 1;
+    const favorites = visible.filter((c) => c.favorite);
+    const rest = visible.filter((c) => !c.favorite);
+    const categories = [...new Set(rest.map((c) => c.category || 'Autre'))].sort((a, b) => (a === 'Autre' ? 1 : b === 'Autre' ? -1 : a.localeCompare(b, 'fr')));
+    const group = (title, items) => (items.length ? h('div', { class: 'doc-group' }, h('h3', null, title), h('ul', { class: 'contact-list' }, items.map((c) => contactRow(c, multiCircle)))) : null);
+    mount(box, visible.length
+      ? [group('Favoris', favorites), ...categories.map((cat) => group(cat, rest.filter((c) => (c.category || 'Autre') === cat)))]
+      : emptyState('Aucun contact pour le moment.'));
   }
 
   await load();

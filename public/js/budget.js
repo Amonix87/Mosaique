@@ -1,4 +1,6 @@
-import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2 } from './core.js';
+
+const MONTH_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
 
 const CATS = ['École', 'Santé', 'Loisirs', 'Habillement', 'Cantine', 'Activités', 'Autre'];
 const FREQS = { weekly: 'Toutes les semaines', monthly: 'Tous les mois', quarterly: 'Tous les trimestres', yearly: 'Tous les ans' };
@@ -159,13 +161,14 @@ export async function budget(root) {
   const filterBar = h('div', { class: 'filter-bar' }, period.node, catSelect, resetBtn);
   const balBox = h('div', { class: 'stack' });
   const catBox = h('div', { class: 'stack' });
+  const trendBox = h('div', { class: 'stack' });
   const recBox = h('div', { class: 'stack' });
   const listBox = h('div', { class: 'stack' });
 
   append(root, pageHead('Budget', h('div', { class: 'row gap' },
     h('button', { class: 'btn', onclick: () => settlementForm({ circleId, done: load }) }, icon('swap', 16), 'Remboursement'),
     h('button', { class: 'btn primary', onclick: () => expenseForm({ circleId, done: load }) }, icon('plus', 16), 'Dépense'))),
-    chips, filterBar, balBox, catBox, recBox, listBox);
+    chips, filterBar, balBox, catBox, trendBox, recBox, listBox);
 
   async function load() {
     [expenses, recurring, summary] = await Promise.all([get('/expenses'), get('/recurring-expenses'), get(`/expenses/summary?circle_id=${circleId}&${period.query()}`)]);
@@ -174,7 +177,26 @@ export async function budget(root) {
   }
   onRefresh(['expenses', 'recurring-expenses'], load);
 
-  function draw() { drawBalances(); drawCats(); drawRecurring(); drawList(); }
+  function draw() { drawBalances(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
+
+  // Vue d'ensemble dans le temps : total dépensé sur ce cercle, mois par mois (indépendant des
+  // filtres période/catégorie ci-dessus, qui ne portent que sur le détail par catégorie et l'historique).
+  function drawTrend() {
+    const inCircle = expenses.filter((e) => e.circle_id === circleId);
+    const now = new Date();
+    const months = Array.from({ length: 6 }, (_, i) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
+      return { key: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`, label: MONTH_SHORT[d.getMonth()] };
+    });
+    const totals = months.map((m) => inCircle.filter((e) => e.date.slice(0, 7) === m.key).reduce((a, e) => a + e.amount_cents, 0));
+    const max = Math.max(1, ...totals);
+    if (!totals.some(Boolean)) { mount(trendBox); return; } // rien à montrer tant qu'il n'y a aucune dépense sur ces 6 mois
+    mount(trendBox, h('h2', null, '6 derniers mois'),
+      h('div', { class: 'trend-chart' }, months.map((m, i) => h('div', { class: 'trend-bar-col', title: `${m.label} : ${euro(totals[i])}` },
+        h('div', { class: 'trend-bar-track' }, h('div', { class: 'trend-bar', style: { height: `${Math.max(2, (totals[i] / max) * 100)}%` } })),
+        h('span', { class: 'trend-amount' }, totals[i] ? euro(totals[i]) : ''),
+        h('span', { class: 'trend-label' }, m.label)))));
+  }
 
   function drawBalances() {
     const me = state.me.user.id;

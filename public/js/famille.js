@@ -1,5 +1,7 @@
 import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, modal, opt, pageHead, avatar, TILE_COLORS, myCircles, applyMe, mount, append, publicOrigin } from './core.js';
 
+const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+
 function inviteLink(token) {
   return `${publicOrigin()}/#/rejoindre/${token}`;
 }
@@ -130,6 +132,12 @@ function childForm(c, done) {
       name: 'color', label: 'Couleur', type: 'color', value: defaultColor, options: colorChoices.map((x) => opt(x, x)),
       hint: availableColors.length ? undefined : 'Toutes les couleurs disponibles sont déjà utilisées par un autre enfant ; deux enfants partageront la même.',
     },
+    // Fiche santé : facultative, visible par les mêmes personnes que le reste de la fiche enfant
+    // (utile pour un·e babysitter ou en cas d'urgence, sans avoir à fouiller les contacts).
+    { name: 'blood_type', label: 'Groupe sanguin (facultatif)', type: 'select', value: c ? c.blood_type || '' : '', options: [opt('', 'Non renseigné'), ...BLOOD_TYPES.map((t) => opt(t, t))] },
+    { name: 'allergies', label: 'Allergies (facultatif)', type: 'textarea', value: c ? c.allergies || '' : '', placeholder: 'Ex. : arachides, pénicilline…' },
+    { name: 'doctor_name', label: 'Médecin traitant (facultatif)', value: c ? c.doctor_name || '' : '', maxlength: 200 },
+    { name: 'doctor_phone', label: 'Téléphone du médecin (facultatif)', type: 'tel', value: c ? c.doctor_phone || '' : '' },
     ...(isAdmin ? (() => {
       const pv = parentsViewersField(c);
       return [
@@ -201,6 +209,9 @@ export async function famille(root) {
         h('span', { class: 'dot big', style: { background: c.color } }), h('strong', null, c.name), c.birthdate ? h('span', { class: 'muted' }, c.birthdate) : null, h('span', { class: 'tag' }, `Zone ${c.zone}`),
         c.parent_ids.length ? h('span', { class: 'tag' }, 'Parents : ', c.parent_ids.map((id) => (state.users.find((u) => u.id === id) || {}).name).filter(Boolean).join(', ')) : h('span', { class: 'muted' }, 'Visible par tout le cercle'),
         c.viewer_ids.length ? h('span', { class: 'tag' }, 'Lecture seule : ', c.viewer_ids.map((id) => (state.users.find((u) => u.id === id) || {}).name).filter(Boolean).join(', ')) : null,
+        c.blood_type ? h('span', { class: 'tag' }, 'Groupe sanguin : ', c.blood_type) : null,
+        c.allergies ? h('span', { class: 'tag warn' }, icon('sos', 13), ' Allergies : ', c.allergies) : null,
+        (c.doctor_name || c.doctor_phone) ? h('span', { class: 'tag' }, 'Médecin : ', [c.doctor_name, c.doctor_phone].filter(Boolean).join(' · ')) : null,
         h('div', { class: 'row gap' }, h('button', { class: 'btn small', onclick: () => childForm(c, refresh) }, 'Modifier'),
           me.is_admin ? h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer ${c.name} ?`)) act(async () => { await del(`/children/${c.id}`); toast('Enfant supprimé'); refresh(); }); } }, icon('trash', 16)) : null)))),
       h('button', { class: 'btn', onclick: () => childForm(null, refresh) }, icon('plus', 16), 'Ajouter un enfant')));

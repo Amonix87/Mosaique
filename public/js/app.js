@@ -38,17 +38,25 @@ const NAV_MAIN = ['accueil', 'agenda', 'garde', 'taches', 'budget'];
 let stream = null;
 
 async function accueil(root) {
-  const { pageHead, emptyState, fmtWhen, fmtDayY, avatar, userById, childById, activeCircleId, today } = await import('./core.js');
+  const { pageHead, emptyState, fmtWhen, fmtDayY, avatar, userById, userName, childById, activeCircleId, today, addDays } = await import('./core.js');
   append(root, pageHead(`Bonjour ${state.me.user.name.split(' ')[0]}`));
   const [events, tasks, sos] = await Promise.all([
-    get(`/events/range?from=${today()}&to=${(() => { const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10); })()}`),
+    // Les deux bornes doivent être calculées en heure locale (comme `today()`) : utiliser l'UTC pour
+    // l'une des deux pouvait, selon l'heure du jour, décaler la fenêtre d'un jour (ex. 22h-minuit en été).
+    get(`/events/range?from=${today()}&to=${addDays(today(), 14)}`),
     get('/tasks'), get('/sos'),
   ]);
   const openSos = sos.filter((s) => s.status === 'open');
   if (openSos.length) append(root, h('section', { class: 'card alert' }, h('h2', null, 'SOS remplacement'),
     h('ul', { class: 'stack' }, openSos.map((s) => h('li', { class: 'row between center' },
       h('span', null, h('strong', null, s.title), s.note ? h('div', { class: 'muted' }, s.note) : null),
-      h('button', { class: 'btn primary small', onclick: () => act(async () => { await post(`/sos/${s.id}/take`); toast('Vous avez pris le relais'); location.reload(); }) }, 'Je prends')))))); 
+      h('button', { class: 'btn primary small', onclick: () => act(async () => { await post(`/sos/${s.id}/take`); toast('Vous avez pris le relais'); location.reload(); }) }, 'Je prends'))))));
+  // Historique récent (3 derniers jours) : qui a pris le relais, pour savoir qui dépanner la prochaine fois.
+  const sosHistory = sos.filter((s) => s.status !== 'open');
+  if (sosHistory.length) append(root, h('section', { class: 'card' }, h('h2', null, 'SOS récents'),
+    h('ul', { class: 'stack' }, sosHistory.map((s) => h('li', { class: 'row between center' },
+      h('span', null, h('strong', null, s.title), s.note ? h('div', { class: 'muted' }, s.note) : null),
+      h('span', { class: 'muted' }, s.status === 'taken' ? `Pris en charge par ${userName(s.taken_by)} · ${ago(s.taken_at)}` : 'Annulé'))))));
   const upcoming = events.slice(0, 6);
   append(root, h('section', { class: 'card' }, h('h2', null, 'Prochains événements'),
     upcoming.length ? h('ul', { class: 'stack' }, upcoming.map((e) => h('li', { class: 'row between center' }, h('span', null, e.title), h('span', { class: 'muted' }, fmtWhen(e))))) : emptyState('Rien de prévu dans les 14 prochains jours.'),

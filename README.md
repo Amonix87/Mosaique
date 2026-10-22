@@ -208,6 +208,47 @@ Les noms exacts des attributs (`devoirs`, `matiere`, `id`…) dépendent de l'in
 
 Si un serveur SMTP est configuré, chaque personne peut activer dans Réglages → Mon compte « Recevoir le récapitulatif quotidien École ». Un seul e-mail est envoyé par jour, à l'heure choisie (Réglages, par défaut 18h), **uniquement s'il y a une nouveauté** ce jour-là (nouveau devoir, mise à jour, nouveau mot) — jamais d'e-mail vide. Chacun ne reçoit que ce qui concerne les enfants qu'il ou elle peut voir.
 
+## Réservations et factures périscolaires (garderie, cantine, ALSH)
+
+À la différence de Pronote (qui n'a pas d'API officielle du tout), certains portails de
+réservation périscolaire peuvent être synchronisés **directement depuis Mosaïque**, sans script
+externe ni cron à gérer vous-même : Réglages → Administration → « Modules complémentaires ».
+Activez le module correspondant à votre portail, renseignez son adresse et vos identifiants, et
+Mosaïque se charge lui-même de la synchronisation (environ une fois par heure, ou tout de suite
+via « Synchroniser maintenant »).
+
+Vos identifiants sont alors conservés dans la base de Mosaïque (comme l'est déjà, par exemple, le
+mot de passe du serveur SMTP) — jamais transmis ailleurs qu'au portail concerné. Si vous préférez
+ne pas les lui confier, le point d'entrée manuel ci-dessous reste disponible.
+
+Un module existe aujourd'hui pour les portails **e-portail** (Berger-Levrault — garderie, cantine,
+ALSH). Si votre commune utilise un autre système, deux options :
+- demander/écrire un module pour celui-ci : voir `server/addons/README.md`, qui explique comment en
+  ajouter un (un simple fichier à déposer dans `server/addons/`, découvert automatiquement) ;
+- ou envoyer vos propres données déjà normalisées, depuis un script ou une automatisation externe,
+  vers les points d'entrée bruts ci-dessous — avec le **même jeton d'intégration École** que Pronote :
+
+```
+POST http://votre-serveur:3000/import/VOTRE_JETON/reservation
+POST http://votre-serveur:3000/import/VOTRE_JETON/facture
+Content-Type: application/json
+```
+
+Une réservation (visible par enfant, comme les devoirs) :
+```json
+{ "child": "Léo", "title": "Garderie matin", "date": "2026-11-10",
+  "start_time": "07:30", "end_time": "08:30", "status": "confirmée",
+  "external_id": "un-identifiant-stable-cote-portail" }
+```
+
+Une facture (rattachée à un cercle plutôt qu'à un enfant — une facture de collectivité couvre en général plusieurs enfants/prestations à la fois) :
+```json
+{ "label": "Cantine novembre", "number": "F-2026-11", "date": "2026-11-01",
+  "due_date": "2026-11-30", "amount": 42.50, "status": "à payer",
+  "circle": "Famille", "external_id": "un-identifiant-stable-cote-portail" }
+```
+`circle` (nom du cercle) ou `circle_id` sont facultatifs si vous n'avez qu'un seul cercle dans Mosaïque. `amount` s'exprime en euros (ou `amount_cents` directement en centimes). Comme pour les devoirs, `external_id` évite les doublons en mettant à jour l'entrée existante plutôt que d'en créer une nouvelle — c'est d'ailleurs exactement ce que font les modules eux-mêmes, en interne.
+
 Un enfant peut être exclu du suivi de garde s'il n'en a pas besoin (il vit toujours au même endroit) : décochez « Concerné par une garde partagée » dans sa fiche (Famille → Enfants → Modifier). Il disparaît alors de l'onglet Garde — planning, statistiques, vacances scolaires — sans que rien d'autre ne change pour lui (agenda, contacts, budget restent inchangés). Réactivable à tout moment.
 
 Chaque attribution de garde est indépendante par enfant : toucher un jour dans la mosaïque d'un enfant ne présélectionne que lui, jamais les autres — pratique quand chaque enfant suit un rythme différent (garde partagée pour l'un, arrangement différent pour l'autre). Vous pouvez toujours cocher manuellement d'autres enfants dans la barre d'action si vous voulez appliquer la même période à plusieurs d'entre eux à la fois.

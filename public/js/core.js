@@ -86,6 +86,7 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
   phone: '<path d="M6 3h3l2 5-2.5 1.5a11 11 0 0 0 6 6L16 13l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 4 5a2 2 0 0 1 2-2z"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+  star: '<path d="M12 3.5l2.6 5.5 6 .8-4.3 4.2 1 6-5.3-2.9-5.3 2.9 1-6-4.3-4.2 6-.8z"/>',
 };
 export function icon(name, size = 20) {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -496,6 +497,8 @@ export const membersOfCircle = (cid) => {
 };
 export const activeCircleId = () => (state.circleFilter !== 'all' && circleById(state.circleFilter) ? state.circleFilter : (myCircles()[0] || {}).id);
 export const inFilter = (row) => state.circleFilter === 'all' || row.circle_id === state.circleFilter;
+// Variante pour les ressources qui peuvent appartenir à plusieurs cercles à la fois (ex. contacts).
+export const inFilterIds = (row) => state.circleFilter === 'all' || (row.circle_ids || []).includes(state.circleFilter);
 export const circleSelectOptions = () => myCircles().map((c) => opt(c.id, c.name));
 
 export function emptyState(text, action) {

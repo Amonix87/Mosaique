@@ -5,6 +5,7 @@ let integrationToken; // chargé à la demande (jeton sensible, jamais inclus da
 let pushStatus; // 'unsupported' | 'denied' | 'unsubscribed' | 'subscribed' | undefined (pas encore vérifié)
 let smtpConfig; // chargé à la demande (admin uniquement), undefined = pas encore demandé
 let publicUrlInfo; // idem, pour l'adresse publique (PUBLIC_URL)
+let addonsList; // idem, pour les addons de réservation périscolaire
 
 export async function reglages(root) {
   const box = h('div', { class: 'stack big' });
@@ -78,6 +79,45 @@ export async function reglages(root) {
       c.configured ? h('p', { class: 'hint' }, 'Pour vérifier que l\'envoi fonctionne, utilisez « Envoyer un e-mail de test » dans la section « Mon compte » ci-dessous.') : null));
   }
 
+  function addonCard(a) {
+    return h('div', { class: 'stack', style: { borderTop: '1px solid var(--border)', paddingTop: '.8rem', marginTop: '.8rem' } },
+      h('form', { class: 'stack', onsubmit: (e) => { e.preventDefault(); act(async () => {
+        const f = e.target.elements;
+        const config = {}; for (const field of a.fields) config[field.key] = f[`${a.id}_${field.key}`].value;
+        const updated = await put(`/addons/${a.id}`, { enabled: f[`${a.id}_enabled`].checked, config });
+        addonsList = addonsList.map((x) => (x.id === a.id ? updated : x));
+        toast('Configuration enregistrée'); draw();
+      }); } },
+        h('label', { class: 'check-field' }, h('input', { type: 'checkbox', name: `${a.id}_enabled`, checked: a.enabled }), h('span', null, h('strong', null, a.label))),
+        a.fields.map((field) => h('label', { class: 'field' }, h('span', { class: 'field-label' }, field.label),
+          h('input', {
+            name: `${a.id}_${field.key}`, type: field.type === 'password' ? 'password' : 'text',
+            value: field.type === 'password' ? '' : (a.config[field.key] || ''),
+            placeholder: field.type === 'password' ? (a.config[field.key] ? 'Laisser vide pour ne pas changer' : '') : (field.placeholder || ''),
+            autocomplete: field.type === 'password' ? 'new-password' : 'off',
+          }))),
+        h('div', { class: 'row gap wrap' },
+          h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer'),
+          a.enabled ? h('button', { class: 'btn small', type: 'button', onclick: () => act(async () => {
+            const r = await post(`/addons/${a.id}/sync`, {});
+            const nOk = (r.reservations || []).filter((x) => x.ok).length + (r.invoices || []).filter((x) => x.ok).length;
+            const nErr = (r.reservations || []).filter((x) => !x.ok).length + (r.invoices || []).filter((x) => !x.ok).length;
+            toast(`Synchronisation : ${nOk} élément(s) importé(s)${nErr ? `, ${nErr} erreur(s)` : ''}`);
+            addonsList = await get('/addons'); draw();
+          }) }, 'Synchroniser maintenant') : null)),
+      a.last_sync_at ? h('p', { class: 'hint' }, `Dernière synchronisation : ${new Date(a.last_sync_at).toLocaleString('fr-FR')}`) : null,
+      a.last_error ? h('p', { class: 'form-error' }, `Dernière erreur : ${a.last_error}`) : null);
+  }
+
+  function addonsSection() {
+    if (addonsList === undefined) { addonsList = 'loading'; get('/addons').then((r) => { addonsList = r; draw(); }); }
+    if (addonsList === 'loading') return h('section', { class: 'card' }, h('h2', null, 'Modules complémentaires'), h('p', { class: 'muted' }, 'Chargement…'));
+    if (!addonsList.length) return null;
+    return h('section', { class: 'card' }, h('h2', null, 'Modules complémentaires (réservations et factures périscolaires)'),
+      h('p', { class: 'muted' }, "Récupère automatiquement vos réservations (garderie, cantine, ALSH…) et vos factures depuis le portail de votre mairie ou de votre collectivité. Vos identifiants restent dans Mosaïque, jamais transmis ailleurs qu'au site concerné."),
+      addonsList.map(addonCard));
+  }
+
   function draw() {
     const me = state.me.user;
     const sections = [];
@@ -140,6 +180,10 @@ export async function reglages(root) {
       h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Heure du récapitulatif quotidien par e-mail'), h('select', { name: 'recap_hour' }, Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: i === state.settings.recap_hour }, `${String(i).padStart(2, '0')}h`)))),
       h('div', { class: 'row end' }, h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer')))));
 
+      sections.push(h('section', { class: 'card' }, h('h2', null, 'Sauvegarde'),
+        h('p', { class: 'muted' }, "Télécharge une archive .zip avec une copie de la base de données et de tous les fichiers envoyés (documents, photos du fil familial...). À faire de temps en temps et à ranger en lieu sûr, en complément d'une vraie sauvegarde du serveur."),
+        h('a', { class: 'btn primary', href: '/api/admin/backup' }, icon('download', 16), ' Télécharger une sauvegarde')));
+
       sections.push(publicUrlSection());
       sections.push(smtpSection());
 
@@ -153,6 +197,8 @@ export async function reglages(root) {
             h('p', { class: 'hint' }, `Adresses d'envoi : ${publicOrigin()}/import/${integrationToken}/homework et /note`),
             h('button', { class: 'btn small', onclick: async () => { if (await confirmBox("Régénérer invalidera l'ancien jeton pour toute intégration déjà branchée. Continuer ?", 'Régénérer')) act(async () => { const r = await post('/settings/integration-token'); integrationToken = r.token; toast('Jeton régénéré'); draw(); }); } }, 'Régénérer'))
             : h('button', { class: 'btn primary', onclick: async () => { const r = await post('/settings/integration-token'); integrationToken = r.token; draw(); } }, 'Générer un jeton')));
+
+        sections.push(addonsSection());
       }
     }
 

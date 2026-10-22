@@ -1,4 +1,4 @@
-import { h, icon, state, get, post, put, del, act, toast, modal, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, inFilter, today, ymd, addDays, toDate, fmtLong, fmtWhen, fmtDay, fmtMonth, timeOf, avatar, userById, childById, circleById, circleSelectOptions, activeCircleId, emptyState, readable, myCircles, mount, append, myEditableChildren, isoWeek, addressField, euro, userName, membersOfCircle, fmtDayY } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, modal, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, inFilter, today, ymd, addDays, toDate, fmtLong, fmtWhen, fmtDay, fmtMonth, timeOf, avatar, userById, childById, circleById, circleSelectOptions, activeCircleId, emptyState, readable, myCircles, mount, append, myEditableChildren, isoWeek, addressField, euro, userName, membersOfCircle, fmtDayY, field, maskFrTime } from './core.js';
 
 let cursor = null; // { y, m }
 let selected = today();
@@ -46,6 +46,49 @@ function locationField(initialValue, initialLat, initialLon) {
   return { node, get: field.get, getLat: field.getLat, getLon: field.getLon };
 }
 
+// Heures de début/fin d'un événement : comme sur Google ou Apple Calendar, modifier l'heure de
+// début décale l'heure de fin pour conserver la même durée (1 h par défaut pour un nouvel
+// événement), jusqu'à ce qu'on modifie l'heure de fin à la main — après quoi elle n'est plus
+// recalculée automatiquement.
+function timeRangeFields(startValue, endValue) {
+  const durationFromTimes = (s, e) => {
+    const [sh, sm] = s.split(':').map(Number); const [eh, em] = e.split(':').map(Number);
+    const diff = (eh * 60 + em) - (sh * 60 + sm);
+    return diff > 0 ? diff : 60;
+  };
+  let duration = (startValue && endValue) ? durationFromTimes(startValue, endValue) : 60;
+  let endTouched = false;
+  const clean = (input) => {
+    const d = input.value.replace(/\D/g, '');
+    if (!d.length) return '';
+    return d.length < 4 ? 'invalide' : `${d.slice(0, 2)}:${d.slice(2, 4)}`;
+  };
+  const addMinutes = (hhmm, mins) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    const total = ((h * 60 + m + mins) % 1440 + 1440) % 1440;
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  };
+  const startInput = h('input', { type: 'text', inputmode: 'numeric', placeholder: 'hh:mm', value: startValue || '' });
+  const endInput = h('input', { type: 'text', inputmode: 'numeric', placeholder: 'hh:mm', value: endValue || '' });
+  startInput.addEventListener('input', () => {
+    startInput.value = maskFrTime(startInput.value);
+    const s = clean(startInput);
+    if (s && s !== 'invalide' && !endTouched) endInput.value = addMinutes(s, duration);
+  });
+  endInput.addEventListener('input', () => {
+    endInput.value = maskFrTime(endInput.value);
+    endTouched = true;
+    const s = clean(startInput); const e = clean(endInput);
+    if (s && s !== 'invalide' && e && e !== 'invalide') duration = durationFromTimes(s, e);
+  });
+  return {
+    startField: field('Heure de début', startInput),
+    endField: field('Heure de fin', endInput, "Calée automatiquement 1 h après le début — modifiez-la si besoin."),
+    getStart: () => clean(startInput),
+    getEnd: () => clean(endInput),
+  };
+}
+
 export function eventForm(ev, defaults = {}, done = () => {}) {
   const isNew = !ev;
   const e = ev || { title: '', all_day: 0, starts_at: (defaults.date || today()) + 'T09:00', ends_at: (defaults.date || today()) + 'T10:00', repeat: 'none', child_ids: [], owner_id: null, owner_mode: 'auto', circle_id: activeCircleId() };
@@ -66,15 +109,22 @@ export function eventForm(ev, defaults = {}, done = () => {}) {
   const ownerSel = [opt('auto', 'Automatique (selon la garde)'), opt('', 'Personne en particulier'), ...state.users.map((u) => opt(u.id, u.name))];
   const ownerValue = e.owner_mode === 'auto' ? 'auto' : (e.owner_id ?? '');
   const locField = locationField(e.location || '', e.location_lat, e.location_lon);
+  const timeFields = timeRangeFields(timeBlock.s, timeBlock.e);
   const specs = [
     { name: 'title', label: 'Titre', value: e.title, required: true, maxlength: 120 },
     ...(circles.length > 1 ? [{ name: 'circle_id', label: 'Partagé avec le cercle', type: 'select', value: e.circle_id, options: circleSelectOptions(), onchange: (v) => fillPayers(Number(v), Number(payerSelect.value)) }] : []),
     { name: 'all_day', label: 'Toute la journée', type: 'checkbox', value: allDay },
     { name: 'start_date', label: 'Début', type: 'date', value: startDate, required: true },
-    { name: 'start_time', label: 'Heure de début', type: 'time', value: timeBlock.s },
+    { name: 'start_time', node: timeFields.startField, get: timeFields.getStart },
     { name: 'end_date', label: 'Fin', type: 'date', value: endDate, required: true },
-    { name: 'end_time', label: 'Heure de fin', type: 'time', value: timeBlock.e },
+    { name: 'end_time', node: timeFields.endField, get: timeFields.getEnd },
     { name: 'owner_id', label: 'Responsable', type: 'select', value: ownerValue, options: ownerSel, hint: "« Automatique » suit qui a la garde ce jour-là ; si la garde change, le responsable affiché change avec elle." },
+    // Cas ponctuel (covoiturage, dépannage...) où le dépôt et la récupération ne sont pas faits par
+    // la même personne que le responsable habituel : facultatif, et sans effet sur celui-ci.
+    ...(state.users.length > 1 ? [
+      { name: 'dropoff_by', label: 'Amené par (si différent du responsable)', type: 'select', value: e.dropoff_by ?? '', options: [opt('', 'Comme le responsable'), ...state.users.map((u) => opt(u.id, u.name))] },
+      { name: 'pickup_by', label: 'Récupéré par (si différent du responsable)', type: 'select', value: e.pickup_by ?? '', options: [opt('', 'Comme le responsable'), ...state.users.map((u) => opt(u.id, u.name))] },
+    ] : []),
     { name: 'child_ids', label: 'Enfants concernés', type: 'checkboxes', value: e.child_ids, options: myEditableChildren().map((c) => opt(c.id, c.name)), hint: 'Le responsable automatique se base sur le premier enfant coché ici.' },
     { name: 'location', node: locField.node, get: locField.get },
     { name: 'location_lat', node: h('span', { style: { display: 'none' } }), get: () => locField.getLat() },
@@ -98,6 +148,8 @@ export function eventForm(ev, defaults = {}, done = () => {}) {
         category: v.category || null,
         owner_mode: v.owner_id === 'auto' ? 'auto' : 'manual',
         owner_id: (v.owner_id && v.owner_id !== 'auto') ? Number(v.owner_id) : null,
+        dropoff_by: v.dropoff_by ? Number(v.dropoff_by) : null,
+        pickup_by: v.pickup_by ? Number(v.pickup_by) : null,
         child_ids: v.child_ids,
         starts_at: ad ? v.start_date : `${v.start_date}T${v.start_time || '00:00'}`,
         ends_at: ad ? v.end_date : `${v.end_date}T${v.end_time || v.start_time || '00:00'}`,
@@ -132,6 +184,9 @@ export function openEvent(ev, reload) {
     ev.location ? h('p', { class: 'row gap center' }, 'Lieu : ', ev.location,
       h('a', { class: 'btn small', href: mapsUrl(ev), target: '_blank', rel: 'noopener' }, icon('compass', 14), ' Itinéraire')) : null,
     owner ? h('p', { class: 'row gap center' }, 'Responsable : ', avatar(owner, 22), owner.name) : null,
+    (ev.dropoff_by || ev.pickup_by) ? h('p', { class: 'row gap wrap center' },
+      ev.dropoff_by ? h('span', { class: 'row gap center' }, 'Amené par ', avatar(ev.dropoff_by, 20), userName(ev.dropoff_by)) : null,
+      ev.pickup_by ? h('span', { class: 'row gap center' }, 'Récupéré par ', avatar(ev.pickup_by, 20), userName(ev.pickup_by)) : null) : null,
     kids.length ? h('p', { class: 'row gap center wrap' }, 'Enfants : ', kids.map((k) => h('span', { class: 'tag', style: { background: k.color, color: readable(k.color) } }, k.name))) : null,
     circle && myCircles().length > 1 ? h('p', { class: 'muted' }, 'Cercle : ', circle.name) : null,
     ev.notes ? h('p', { class: 'notes' }, ev.notes) : null,

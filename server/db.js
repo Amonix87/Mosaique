@@ -246,6 +246,44 @@ CREATE TABLE IF NOT EXISTS school_notes (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_ext ON school_notes(child_id, source, external_id) WHERE external_id IS NOT NULL;
 
+-- Réservations périscolaires (garderie, cantine, ALSH...) : même principe que les devoirs/mots,
+-- reçues depuis l'extérieur (ex. portail e-portail Berger-Levrault via un script de synchronisation),
+-- jamais saisies à la main dans Mosaïque.
+CREATE TABLE IF NOT EXISTS school_reservations (
+  id INTEGER PRIMARY KEY,
+  child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  date TEXT NOT NULL,
+  start_time TEXT,
+  end_time TEXT,
+  status TEXT,
+  source TEXT NOT NULL DEFAULT 'eportail',
+  external_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reservations_ext ON school_reservations(child_id, source, external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_reservations_child_date ON school_reservations(child_id, date);
+
+-- Factures périscolaires (cantine, ALSH...) : reçues de la même façon. Rattachées à un cercle (pas à
+-- un enfant) car une facture de collectivité couvre généralement plusieurs prestations à la fois.
+CREATE TABLE IF NOT EXISTS invoices (
+  id INTEGER PRIMARY KEY,
+  circle_id INTEGER NOT NULL REFERENCES circles(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  number TEXT NOT NULL,
+  date TEXT NOT NULL,
+  due_date TEXT,
+  amount_cents INTEGER NOT NULL,
+  status TEXT,
+  source TEXT NOT NULL DEFAULT 'eportail',
+  external_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_ext ON invoices(circle_id, source, external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_invoices_circle_date ON invoices(circle_id, date);
+
 CREATE TABLE IF NOT EXISTS recipes (
   id INTEGER PRIMARY KEY,
   circle_id INTEGER NOT NULL REFERENCES circles(id) ON DELETE CASCADE,
@@ -331,6 +369,19 @@ CREATE INDEX IF NOT EXISTS idx_events_circle ON events(circle_id, starts_at);
 CREATE INDEX IF NOT EXISTS idx_custody_date ON custody_nights(date);
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_messages_circle ON messages(circle_id, id);
+
+-- SQLite n'indexe pas les clés étrangères par défaut : chaque écran filtre ses listes par
+-- circle_id, donc sans ces index chaque chargement fait un scan complet de la table.
+CREATE INDEX IF NOT EXISTS idx_expenses_circle ON expenses(circle_id, date);
+CREATE INDEX IF NOT EXISTS idx_tasks_circle ON tasks(circle_id);
+CREATE INDEX IF NOT EXISTS idx_shopping_circle ON shopping_items(circle_id);
+CREATE INDEX IF NOT EXISTS idx_documents_circle ON documents(circle_id);
+CREATE INDEX IF NOT EXISTS idx_sos_circle ON sos(circle_id);
+CREATE INDEX IF NOT EXISTS idx_recurring_expenses_circle ON recurring_expenses(circle_id);
+CREATE INDEX IF NOT EXISTS idx_recipes_circle ON recipes(circle_id);
+CREATE INDEX IF NOT EXISTS idx_posts_circle ON posts(circle_id, id);
+CREATE INDEX IF NOT EXISTS idx_homework_child ON homework(child_id);
+CREATE INDEX IF NOT EXISTS idx_notes_child ON school_notes(child_id);
 `);
 
 // Migration légère pour les bases créées avant l'ajout de parent_ids (ne recrée jamais une table existante).
@@ -434,6 +485,56 @@ const recipeCols2 = db.prepare("PRAGMA table_info(recipes)").all().map((c) => c.
 if (!recipeCols2.includes('servings')) {
   db.exec("ALTER TABLE recipes ADD COLUMN ingredients_json TEXT NOT NULL DEFAULT '[]'");
   db.exec('ALTER TABLE recipes ADD COLUMN servings INTEGER');
+}
+
+// Pour un événement ponctuel où le dépôt et la récupération ne sont pas faits par la même
+// personne (ex. : vous amenez l'enfant à son sport, mais c'est sa mère qui vient le rechercher) —
+// par défaut (NULL), les deux restent celles du responsable habituel de l'événement.
+const eventCols3 = db.prepare("PRAGMA table_info(events)").all().map((c) => c.name);
+if (!eventCols3.includes('dropoff_by')) {
+  db.exec('ALTER TABLE events ADD COLUMN dropoff_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
+  db.exec('ALTER TABLE events ADD COLUMN pickup_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
+}
+
+// Un contact peut désormais appartenir à plusieurs cercles à la fois (ex. partagé entre « Famille »
+// et « Coparents »). On reconstruit la table plutôt qu'un simple ADD COLUMN, pour retirer la clé
+// étrangère circle_id -> circles : avec elle, supprimer UN SEUL des cercles d'un contact aurait
+// supprimé tout le contact (cascade), même s'il restait rattaché à d'autres cercles.
+const contactCols = db.prepare("PRAGMA table_info(contacts)").all().map((c) => c.name);
+if (contactCols.includes('circle_id')) {
+  db.exec(`
+    CREATE TABLE contacts_new (
+      id INTEGER PRIMARY KEY,
+      circle_ids TEXT NOT NULL DEFAULT '[]',
+      name TEXT NOT NULL,
+      category TEXT,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      notes TEXT,
+      child_id INTEGER REFERENCES children(id) ON DELETE SET NULL,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO contacts_new (id, circle_ids, name, category, phone, email, address, notes, child_id, created_by, created_at)
+      SELECT id, '[' || circle_id || ']', name, category, phone, email, address, notes, child_id, created_by, created_at FROM contacts;
+    DROP TABLE contacts;
+    ALTER TABLE contacts_new RENAME TO contacts;
+  `);
+}
+const contactCols2 = db.prepare("PRAGMA table_info(contacts)").all().map((c) => c.name);
+if (!contactCols2.includes('favorite')) {
+  db.exec('ALTER TABLE contacts ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0');
+}
+
+// Petite fiche santé par enfant (groupe sanguin, allergies, médecin traitant) : utile à retrouver
+// vite (babysitter, urgence) sans avoir à fouiller les notes éparpillées dans Contacts.
+const childCols2 = db.prepare("PRAGMA table_info(children)").all().map((c) => c.name);
+if (!childCols2.includes('blood_type')) {
+  db.exec('ALTER TABLE children ADD COLUMN blood_type TEXT');
+  db.exec('ALTER TABLE children ADD COLUMN allergies TEXT');
+  db.exec('ALTER TABLE children ADD COLUMN doctor_name TEXT');
+  db.exec('ALTER TABLE children ADD COLUMN doctor_phone TEXT');
 }
 
 module.exports = { db, DATA_DIR, MEDIA_DIR };

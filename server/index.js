@@ -16,12 +16,15 @@ const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
+const archiver = require('archiver');
 const { db, DATA_DIR, MEDIA_DIR } = require('./db');
 const { loadHolidays, startAutoRefresh } = require('./holidays');
 const mailer = require('./mailer');
 const push = require('./push');
+const addonManager = require('./addon-manager');
 
 // Catégories utilisées à la fois pour la liste de courses et les ingrédients de recette, afin que
 // le planificateur de repas puisse regrouper les articles générés de la même façon que ceux ajoutés à la main.
@@ -362,6 +365,31 @@ api.put('/me', (req, res) => {
 // d'événements et de tâches, récap École) : utile pour vérifier une configuration sans attendre.
 api.post('/admin/run-checks', requireAdmin, (req, res) => { tick(); res.json({ ok: true }); });
 
+// Sauvegarde manuelle : une archive .zip avec une copie cohérente de la base (via l'API de backup
+// de SQLite, sûre même pendant des écritures en cours) et tous les fichiers envoyés (documents,
+// photos du fil familial...). Pas de dépendance au contenu exact de DATA_DIR : si sa structure
+// change un jour, cette route n'a pas besoin d'être mise à jour, seuls UPLOAD_DIR et la base le sont.
+api.get('/admin/backup', requireAdmin, async (req, res, next) => {
+  const tmpDbPath = path.join(os.tmpdir(), `mosaique-backup-${crypto.randomUUID()}.db`);
+  try {
+    await db.backup(tmpDbPath);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="mosaique-sauvegarde-${stamp}.zip"`);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('warning', (err) => console.error('[backup] avertissement', err));
+    archive.on('error', (err) => { try { res.destroy(err); } catch { /* déjà fermée */ } });
+    archive.pipe(res);
+    archive.file(tmpDbPath, { name: 'mosaique.db' });
+    if (fs.existsSync(UPLOAD_DIR)) archive.directory(UPLOAD_DIR, 'uploads');
+    await archive.finalize();
+  } catch (err) {
+    next(err);
+  } finally {
+    fs.unlink(tmpDbPath, () => {});
+  }
+});
+
 api.get('/settings/public-url', requireAdmin, (req, res) => {
   res.json(appUrl.publicUrlInfo());
 });
@@ -555,7 +583,18 @@ api.put('/circles/:id', requireAdmin, (req, res) => {
 
 api.delete('/circles/:id', requireAdmin, (req, res) => {
   if (db.prepare('SELECT COUNT(*) n FROM circles').get().n <= 1) throw bad('Il faut conserver au moins un cercle.');
-  db.prepare('DELETE FROM circles WHERE id=?').run(Number(req.params.id));
+  const id = Number(req.params.id);
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM circles WHERE id=?').run(id);
+    // Les contacts n'ont pas de clé étrangère sur circle_id (ils peuvent être dans plusieurs cercles) :
+    // on retire ce cercle de leur liste à la main, et on ne supprime le contact que s'il n'en reste aucun.
+    for (const row of db.prepare('SELECT id, circle_ids FROM contacts').all()) {
+      const remaining = parseJ(row.circle_ids, []).filter((cid) => cid !== id);
+      if (!remaining.length) db.prepare('DELETE FROM contacts WHERE id=?').run(row.id);
+      else db.prepare('UPDATE contacts SET circle_ids=? WHERE id=?').run(JSON.stringify(remaining), row.id);
+    }
+  });
+  tx();
   res.json({ ok: true });
 });
 
@@ -572,12 +611,14 @@ function colorTakenByAnotherChild(color, exceptId) {
 }
 
 const validTime = (s) => /^\d{2}:\d{2}$/.test(s) && +s.slice(0, 2) < 24 && +s.slice(3) < 60;
+const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
 api.post('/children', (req, res) => {
-  const { name, color, birthdate, parent_ids, viewer_ids, zone, shared_custody, handover_location, handover_time } = req.body || {};
+  const { name, color, birthdate, parent_ids, viewer_ids, zone, shared_custody, handover_location, handover_time, blood_type, allergies, doctor_name, doctor_phone } = req.body || {};
   if (!name || !String(name).trim()) throw bad('Le prénom est requis.');
   if (birthdate && !validDate(birthdate)) throw bad('Date de naissance invalide.');
   if (handover_time && !validTime(handover_time)) throw bad('Heure de transition invalide.');
+  if (blood_type && !BLOOD_TYPES.includes(blood_type)) throw bad('Groupe sanguin invalide.');
   const finalColor = HEX.test(color || '') ? color : '#E4572E';
   if (colorTakenByAnotherChild(finalColor, null)) throw bad('Cette couleur est déjà utilisée par un autre enfant.');
   const finalZone = ['A', 'B', 'C'].includes(zone) ? zone : 'B';
@@ -588,13 +629,15 @@ api.post('/children', (req, res) => {
     if (parent_ids !== undefined) pids = validateParentIds(parent_ids);
     if (viewer_ids !== undefined) vids = validateParentIds(viewer_ids);
   }
-  const r = db.prepare('INSERT INTO children(name,color,birthdate,parent_ids,viewer_ids,zone,shared_custody,handover_location,handover_time) VALUES(?,?,?,?,?,?,?,?,?)')
+  const r = db.prepare('INSERT INTO children(name,color,birthdate,parent_ids,viewer_ids,zone,shared_custody,handover_location,handover_time,blood_type,allergies,doctor_name,doctor_phone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
     .run(String(name).trim().slice(0, 60), finalColor, birthdate || null, JSON.stringify(pids), JSON.stringify(vids), finalZone, finalShared,
-      handover_location ? String(handover_location).trim().slice(0, 200) : null, handover_time || null);
+      handover_location ? String(handover_location).trim().slice(0, 200) : null, handover_time || null,
+      blood_type || null, allergies ? String(allergies).trim().slice(0, 1000) : null,
+      doctor_name ? String(doctor_name).trim().slice(0, 200) : null, doctor_phone ? String(doctor_phone).trim().slice(0, 50) : null);
   res.json({ id: r.lastInsertRowid });
 });
 api.put('/children/:id', (req, res) => {
-  const { name, color, birthdate, parent_ids, viewer_ids, zone, shared_custody, handover_location, handover_time } = req.body || {};
+  const { name, color, birthdate, parent_ids, viewer_ids, zone, shared_custody, handover_location, handover_time, blood_type, allergies, doctor_name, doctor_phone } = req.body || {};
   const id = Number(req.params.id);
   if (name !== undefined) db.prepare('UPDATE children SET name=? WHERE id=?').run(String(name).trim().slice(0, 60), id);
   if (color !== undefined && HEX.test(color)) {
@@ -626,6 +669,19 @@ api.put('/children/:id', (req, res) => {
   if (viewer_ids !== undefined) {
     if (!req.user.is_admin) throw new HttpError(403, "Seul un administrateur peut désigner les lecteurs d'un enfant.");
     db.prepare('UPDATE children SET viewer_ids=? WHERE id=?').run(JSON.stringify(validateParentIds(viewer_ids)), id);
+  }
+  if (blood_type !== undefined) {
+    if (blood_type && !BLOOD_TYPES.includes(blood_type)) throw bad('Groupe sanguin invalide.');
+    db.prepare('UPDATE children SET blood_type=? WHERE id=?').run(blood_type || null, id);
+  }
+  if (allergies !== undefined) {
+    db.prepare('UPDATE children SET allergies=? WHERE id=?').run(allergies ? String(allergies).trim().slice(0, 1000) : null, id);
+  }
+  if (doctor_name !== undefined) {
+    db.prepare('UPDATE children SET doctor_name=? WHERE id=?').run(doctor_name ? String(doctor_name).trim().slice(0, 200) : null, id);
+  }
+  if (doctor_phone !== undefined) {
+    db.prepare('UPDATE children SET doctor_phone=? WHERE id=?').run(doctor_phone ? String(doctor_phone).trim().slice(0, 50) : null, id);
   }
   res.json({ ok: true });
 });
@@ -819,11 +875,28 @@ function syncEventExpense(before, after, userId) {
   emitTo(circleMemberIds(after.circle_id), { type: 'refresh', what: 'expenses' });
 }
 
+// Qui doit être prévenu pour un événement donné : le responsable désigné (manuel, ou déterminé par
+// la garde du jour en mode auto) plus, s'ils sont différents, les personnes chargées du dépôt et/ou
+// de la récupération (covoiturage, SOS ponctuel) ; sans responsable identifiable, tout le cercle.
+// Utilisé à la création, à la modification et pour les rappels, afin que ces trois cas restent cohérents.
+function eventNotifyTargets(row) {
+  let ownerId = row.owner_id;
+  if (row.owner_mode === 'auto') {
+    const childIds = parseJ(row.child_ids, []);
+    if (childIds.length) {
+      const night = db.prepare('SELECT parent_id FROM custody_nights WHERE child_id=? AND date=?').get(childIds[0], row.starts_at.slice(0, 10));
+      ownerId = night ? night.parent_id : null;
+    }
+  }
+  const extra = [row.dropoff_by, row.pickup_by].filter(Boolean);
+  return (ownerId || extra.length) ? [...new Set([ownerId, ...extra].filter(Boolean))] : circleMemberIds(row.circle_id);
+}
+
 /* Événements */
 mountResource('events', 'events', {
   title: 's', starts_at: 'dt', ends_at: 'dt?', all_day: 'b', location: 's?', location_lat: 'f?', location_lon: 'f?', notes: 'text?',
   owner_id: 'i?', owner_mode: 'ownermode', child_ids: 'ids', repeat: 'rep', repeat_until: 'd?', reminder_minutes: 'i?',
-  category: 's?', price_cents: 'cents?', price_paid_by: 'i?',
+  category: 's?', price_cents: 'cents?', price_paid_by: 'i?', dropoff_by: 'i?', pickup_by: 'i?',
 }, {
   order: 'ORDER BY starts_at',
   decode: (r) => ({ ...r, child_ids: parseJ(r.child_ids, []) }),
@@ -851,8 +924,24 @@ mountResource('events', 'events', {
     if (nextPayer !== null && !circleMemberIds(row.circle_id).includes(nextPayer)) throw bad('Le payeur doit faire partie du cercle.');
     if ((nextPrice !== row.price_cents || nextPayer !== row.price_paid_by) && !canModifyOwn(req.user, row)) throw new HttpError(403, "Seule la personne qui a créé cet événement peut modifier son prix ou son payeur.");
     if (nextPrice !== null && (b.repeat !== undefined ? b.repeat : row.repeat) !== 'none') throw bad(EVENT_PRICE_REPEAT_MSG);
+    // Dépôt/récupération par quelqu'un d'autre que le responsable habituel (ex. : covoiturage, SOS
+    // ponctuel) : la personne désignée doit tout de même faire partie du cercle de l'événement.
+    const nextDropoff = b.dropoff_by !== undefined ? ((b.dropoff_by === null || b.dropoff_by === '') ? null : Number(b.dropoff_by)) : row.dropoff_by;
+    const nextPickup = b.pickup_by !== undefined ? ((b.pickup_by === null || b.pickup_by === '') ? null : Number(b.pickup_by)) : row.pickup_by;
+    if (nextDropoff !== null && !circleMemberIds(row.circle_id).includes(nextDropoff)) throw bad('La personne qui amène doit faire partie du cercle.');
+    if (nextPickup !== null && !circleMemberIds(row.circle_id).includes(nextPickup)) throw bad('La personne qui récupère doit faire partie du cercle.');
   },
-  afterUpdate: (before, after, req) => syncEventExpense(before, after, req.user.id),
+  afterUpdate: (before, after, req) => {
+    syncEventExpense(before, after, req.user.id);
+    // Seuls les changements qui concernent vraiment « qui doit s'en occuper » notifient : les autres
+    // champs (notes, catégorie, prix...) n'intéressent pas forcément tout le monde à chaque retouche.
+    const RELEVANT = ['starts_at', 'location', 'all_day', 'owner_id', 'owner_mode', 'dropoff_by', 'pickup_by'];
+    if (RELEVANT.some((k) => before[k] !== after[k])) {
+      notify(eventNotifyTargets(after), {
+        kind: 'event', title: `Événement modifié : ${after.title}`, body: after.starts_at.replace('T', ' à '), link: '#/agenda',
+      }, req.user.id);
+    }
+  },
   beforeDelete: (row, req) => {
     if (!editableForChildren(req.user, row.child_ids)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à un des enfants de cet événement.");
   },
@@ -863,21 +952,12 @@ mountResource('events', 'events', {
     if (v.category !== null && !EVENT_CATEGORIES.includes(v.category)) throw bad('Catégorie invalide.');
     if (v.price_cents !== null && v.repeat !== 'none') throw bad(EVENT_PRICE_REPEAT_MSG);
     if (v.price_paid_by !== null && !circleMemberIds(Number((req.body || {}).circle_id)).includes(v.price_paid_by)) throw bad('Le payeur doit faire partie du cercle.');
+    if (v.dropoff_by !== null && !circleMemberIds(v.circle_id).includes(v.dropoff_by)) throw bad('La personne qui amène doit faire partie du cercle.');
+    if (v.pickup_by !== null && !circleMemberIds(v.circle_id).includes(v.pickup_by)) throw bad('La personne qui récupère doit faire partie du cercle.');
   },
   afterCreate: (row, req) => {
     if (row.price_cents) syncEventExpense({ ...row, price_cents: null }, row, req.user.id);
-    // Seul le responsable désigné est notifié (y compris quand il est déterminé automatiquement
-    // par la garde du jour) ; sans responsable identifiable, tout le cercle l'est, comme avant.
-    let ownerId = row.owner_id;
-    if (row.owner_mode === 'auto') {
-      const childIds = parseJ(row.child_ids, []);
-      if (childIds.length) {
-        const night = db.prepare('SELECT parent_id FROM custody_nights WHERE child_id=? AND date=?').get(childIds[0], row.starts_at.slice(0, 10));
-        ownerId = night ? night.parent_id : null;
-      }
-    }
-    const targets = ownerId ? [ownerId] : circleMemberIds(row.circle_id);
-    notify(targets, {
+    notify(eventNotifyTargets(row), {
       kind: 'event', title: `Nouvel événement : ${row.title}`, body: row.starts_at.replace('T', ' à '), link: '#/agenda',
     }, req.user.id);
   },
@@ -1111,16 +1191,95 @@ api.delete('/shopping/done', (req, res) => {
   res.json({ ok: true });
 });
 
-/* Contacts */
-mountResource('contacts', 'contacts', { name: 's', category: 's?', phone: 's?', email: 's?', address: 's?', notes: 'text?', child_id: 'i?' }, {
-  order: 'ORDER BY name COLLATE NOCASE',
-  filter: (rows, req) => rows.filter((r) => !r.child_id || canSeeChild(req.user, r.child_id)),
-  validate: (v, req) => { if (v.child_id !== null && !canEditChild(req.user, v.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant."); },
-  beforeUpdate: (row, b, sets, vals, req) => {
-    if (row.child_id && !canEditChild(req.user, row.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant.");
-    if (b.child_id !== undefined && b.child_id !== null && !canEditChild(req.user, b.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant.");
-  },
-  beforeDelete: (row, req) => { if (row.child_id && !canEditChild(req.user, row.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant."); },
+/* Contacts : peuvent appartenir à plusieurs cercles à la fois (ex. un médecin partagé entre la
+   famille au complet et le cercle des coparents), donc pas de mountResource générique ici. */
+function sanitizeContact(b) {
+  const name = String((b && b.name) || '').trim();
+  if (!name) throw bad('Le nom est requis.');
+  const trim = (v, max) => (v ? String(v).trim().slice(0, max) : null);
+  return {
+    name: name.slice(0, 500),
+    category: trim(b.category, 500),
+    phone: trim(b.phone, 500),
+    email: trim(b.email, 500),
+    address: trim(b.address, 500),
+    notes: trim(b.notes, 4000),
+  };
+}
+function sanitizeCircleIds(ids, user) {
+  if (!Array.isArray(ids)) throw bad('Sélectionnez au moins un cercle.');
+  const uniq = [...new Set(ids.map(Number).filter(Number.isInteger))];
+  if (!uniq.length) throw bad('Sélectionnez au moins un cercle.');
+  const mine = myCircles(user.id);
+  if (!uniq.every((id) => mine.includes(id))) throw new HttpError(403, "Vous n'avez pas accès à un des cercles sélectionnés.");
+  return uniq;
+}
+function sanitizeContactChild(childId, user) {
+  if (childId === null || childId === undefined || childId === '') return null;
+  const id = Number(childId);
+  if (!Number.isInteger(id) || !childExists(id)) throw bad('Enfant introuvable.');
+  if (!canEditChild(user, id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant.");
+  return id;
+}
+const decodeContact = (r) => ({ ...r, circle_ids: parseJ(r.circle_ids, []) });
+
+api.get('/contacts', (req, res) => {
+  const mine = myCircles(req.user.id);
+  const rows = db.prepare('SELECT * FROM contacts ORDER BY name COLLATE NOCASE').all()
+    .map(decodeContact)
+    .filter((r) => r.circle_ids.some((id) => mine.includes(id)))
+    .filter((r) => !r.child_id || canSeeChild(req.user, r.child_id));
+  res.json(rows);
+});
+
+api.post('/contacts', (req, res) => {
+  const b = req.body || {};
+  const circleIds = sanitizeCircleIds(b.circle_ids, req.user);
+  const childId = sanitizeContactChild(b.child_id, req.user);
+  const c = sanitizeContact(b);
+  const r = db.prepare('INSERT INTO contacts(circle_ids,name,category,phone,email,address,notes,child_id,favorite,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .run(JSON.stringify(circleIds), c.name, c.category, c.phone, c.email, c.address, c.notes, childId, b.favorite ? 1 : 0, req.user.id);
+  const row = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid);
+  emitTo(circleIds.flatMap(circleMemberIds), { type: 'refresh', what: 'contacts' });
+  res.json(decodeContact(row));
+});
+
+api.put('/contacts/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM contacts WHERE id=?').get(Number(req.params.id));
+  if (!row) throw new HttpError(404, 'Introuvable.');
+  const existingIds = parseJ(row.circle_ids, []);
+  const mine = myCircles(req.user.id);
+  if (!existingIds.some((id) => mine.includes(id))) throw new HttpError(403, "Vous n'avez pas accès à ce contact.");
+  if (row.child_id && !canEditChild(req.user, row.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant.");
+  const b = req.body || {};
+  const circleIds = b.circle_ids !== undefined ? sanitizeCircleIds(b.circle_ids, req.user) : existingIds;
+  const childId = b.child_id !== undefined ? sanitizeContactChild(b.child_id, req.user) : row.child_id;
+  const sets = ['circle_ids=?']; const vals = [JSON.stringify(circleIds)];
+  if (b.child_id !== undefined) { sets.push('child_id=?'); vals.push(childId); }
+  if (b.favorite !== undefined) { sets.push('favorite=?'); vals.push(b.favorite ? 1 : 0); }
+  if (b.name !== undefined || b.category !== undefined || b.phone !== undefined || b.email !== undefined || b.address !== undefined || b.notes !== undefined) {
+    const c = sanitizeContact({ name: b.name !== undefined ? b.name : row.name, category: b.category !== undefined ? b.category : row.category,
+      phone: b.phone !== undefined ? b.phone : row.phone, email: b.email !== undefined ? b.email : row.email,
+      address: b.address !== undefined ? b.address : row.address, notes: b.notes !== undefined ? b.notes : row.notes });
+    sets.push('name=?', 'category=?', 'phone=?', 'email=?', 'address=?', 'notes=?');
+    vals.push(c.name, c.category, c.phone, c.email, c.address, c.notes);
+  }
+  db.prepare(`UPDATE contacts SET ${sets.join(',')} WHERE id=?`).run(...vals, row.id);
+  const updated = db.prepare('SELECT * FROM contacts WHERE id=?').get(row.id);
+  emitTo([...new Set([...existingIds, ...circleIds])].flatMap(circleMemberIds), { type: 'refresh', what: 'contacts' });
+  res.json(decodeContact(updated));
+});
+
+api.delete('/contacts/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM contacts WHERE id=?').get(Number(req.params.id));
+  if (!row) throw new HttpError(404, 'Introuvable.');
+  const existingIds = parseJ(row.circle_ids, []);
+  const mine = myCircles(req.user.id);
+  if (!existingIds.some((id) => mine.includes(id))) throw new HttpError(403, "Vous n'avez pas accès à ce contact.");
+  if (row.child_id && !canEditChild(req.user, row.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant.");
+  db.prepare('DELETE FROM contacts WHERE id=?').run(row.id);
+  emitTo(existingIds.flatMap(circleMemberIds), { type: 'refresh', what: 'contacts' });
+  res.json({ ok: true });
 });
 
 /* ───────────────────────── École : devoirs et mots (Pronote ou autre source externe) ─────────────────────────
@@ -1169,6 +1328,35 @@ api.delete('/notes/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Réservations périscolaires (garderie, cantine, ALSH...) : même principe que les devoirs/mots
+// ci-dessus (visibilité par enfant, reçues via /import/:token, jamais saisies à la main).
+api.get('/reservations', (req, res) => {
+  const rows = db.prepare("SELECT * FROM school_reservations ORDER BY date, COALESCE(start_time,''), id").all()
+    .filter((r) => canSeeChild(req.user, r.child_id));
+  res.json(rows);
+});
+api.delete('/reservations/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM school_reservations WHERE id=?').get(Number(req.params.id));
+  if (!row) throw new HttpError(404, 'Introuvable.');
+  if (!canEditChild(req.user, row.child_id)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à cet enfant.");
+  db.prepare('DELETE FROM school_reservations WHERE id=?').run(row.id);
+  res.json({ ok: true });
+});
+
+// Factures périscolaires : rattachées à un cercle (pas à un enfant), reçues de la même façon.
+api.get('/invoices', (req, res) => {
+  const circles = myCircles(req.user.id);
+  if (!circles.length) return res.json([]);
+  res.json(db.prepare(`SELECT * FROM invoices WHERE circle_id IN (${placeholders(circles)}) ORDER BY date DESC, id DESC`).all(...circles));
+});
+api.delete('/invoices/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
+  if (!row) throw new HttpError(404, 'Introuvable.');
+  requireMember(req.user, row.circle_id);
+  db.prepare('DELETE FROM invoices WHERE id=?').run(row.id);
+  res.json({ ok: true });
+});
+
 api.get('/settings/integration-token', requireAdmin, (req, res) => {
   res.json({ token: getSetting('integration_token', null) });
 });
@@ -1176,6 +1364,19 @@ api.post('/settings/integration-token', requireAdmin, (req, res) => {
   const token = randToken(32);
   setSetting('integration_token', token);
   res.json({ token });
+});
+
+// Addons de réservation périscolaire (server/addons/*.js) : configuration et déclenchement manuel
+// depuis Réglages → Administration. Les identifiants ne sont jamais renvoyés en clair (voir
+// addon-manager.js) ; la synchronisation automatique périodique est gérée par maybeSyncAddons(), appelée depuis tick().
+api.get('/addons', requireAdmin, (req, res) => res.json(addonManager.list()));
+api.put('/addons/:id', requireAdmin, (req, res) => {
+  try { res.json(addonManager.saveConfig(req.params.id, req.body || {})); }
+  catch (e) { throw new HttpError(e.status || 400, e.message); }
+});
+api.post('/addons/:id/sync', requireAdmin, async (req, res, next) => {
+  try { res.json({ ok: true, ...(await runAddonSync(req.params.id)) }); }
+  catch (e) { addonManager.recordSyncError(req.params.id, e.message); next(e instanceof HttpError ? e : new HttpError(502, e.message)); }
 });
 
 /* Dépenses partagées */
@@ -1994,10 +2195,102 @@ function upsertNote(childId, item) {
     .run(childId, title, body, date, src, extId);
   return { ok: true, id: r.lastInsertRowid, updated: false };
 }
+// Une facture n'est pas liée à un enfant mais à un cercle : par nom (comme pour un enfant), par id,
+// ou — cas le plus courant, une seule famille — le cercle unique du système s'il n'y en a qu'un.
+function resolveImportCircle(item) {
+  if (item && item.circle_id !== undefined) return db.prepare('SELECT * FROM circles WHERE id=?').get(Number(item.circle_id)) || null;
+  if (item && item.circle) {
+    const n = String(item.circle).trim().toLowerCase();
+    return db.prepare('SELECT * FROM circles').all().find((c) => c.name.toLowerCase() === n) || null;
+  }
+  const all = db.prepare('SELECT * FROM circles').all();
+  return all.length === 1 ? all[0] : null;
+}
+function upsertReservation(childId, item) {
+  const title = item && String(item.title || '').trim().slice(0, 200);
+  if (!title) return { ok: false, error: 'Titre requis.' };
+  if (!item.date || !validDate(item.date)) return { ok: false, error: 'Date invalide.' };
+  const src = (item.source && String(item.source).slice(0, 40)) || 'eportail';
+  const startTime = item.start_time && validTime(item.start_time) ? item.start_time : null;
+  const endTime = item.end_time && validTime(item.end_time) ? item.end_time : null;
+  const status = item.status ? String(item.status).trim().slice(0, 80) : null;
+  const extId = item.external_id ? String(item.external_id).slice(0, 200) : null;
+  if (extId) {
+    const existing = db.prepare('SELECT id FROM school_reservations WHERE child_id=? AND source=? AND external_id=?').get(childId, src, extId);
+    if (existing) {
+      db.prepare("UPDATE school_reservations SET title=?, date=?, start_time=?, end_time=?, status=?, updated_at=datetime('now') WHERE id=?")
+        .run(title, item.date, startTime, endTime, status, existing.id);
+      return { ok: true, id: existing.id, updated: true };
+    }
+  }
+  const r = db.prepare('INSERT INTO school_reservations(child_id,title,date,start_time,end_time,status,source,external_id) VALUES(?,?,?,?,?,?,?,?)')
+    .run(childId, title, item.date, startTime, endTime, status, src, extId);
+  return { ok: true, id: r.lastInsertRowid, updated: false };
+}
+function upsertInvoice(circleId, item) {
+  const label = item && String(item.label || '').trim().slice(0, 200);
+  if (!label) return { ok: false, error: 'Libellé requis.' };
+  if (!item.date || !validDate(item.date)) return { ok: false, error: 'Date invalide.' };
+  const number = item.number ? String(item.number).trim().slice(0, 80) : '';
+  if (!number) return { ok: false, error: 'Numéro requis.' };
+  // Montant accepté en euros (ex. 134.20, comme affiché sur le portail) ou directement en centimes.
+  const amountCents = item.amount_cents !== undefined ? Number(item.amount_cents) : Math.round(Number(item.amount) * 100);
+  if (!Number.isInteger(amountCents) || amountCents <= 0) return { ok: false, error: 'Montant invalide.' };
+  const src = (item.source && String(item.source).slice(0, 40)) || 'eportail';
+  const due = item.due_date && validDate(item.due_date) ? item.due_date : null;
+  const status = item.status ? String(item.status).trim().slice(0, 80) : null;
+  const extId = item.external_id ? String(item.external_id).slice(0, 200) : null;
+  if (extId) {
+    const existing = db.prepare('SELECT id FROM invoices WHERE circle_id=? AND source=? AND external_id=?').get(circleId, src, extId);
+    if (existing) {
+      db.prepare("UPDATE invoices SET label=?, number=?, date=?, due_date=?, amount_cents=?, status=?, updated_at=datetime('now') WHERE id=?")
+        .run(label, number, item.date, due, amountCents, status, existing.id);
+      return { ok: true, id: existing.id, updated: true };
+    }
+  }
+  const r = db.prepare('INSERT INTO invoices(circle_id,label,number,date,due_date,amount_cents,status,source,external_id) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run(circleId, label, number, item.date, due, amountCents, status, src, extId);
+  return { ok: true, id: r.lastInsertRowid, updated: false };
+}
 function checkImportToken(req, res) {
   const token = getSetting('integration_token', null);
   if (!token || req.params.token !== token) { res.status(404).json({ error: 'Jeton invalide.' }); return false; }
   return true;
+}
+
+// Applique le résultat d'un addon (server/addons/*.js) exactement comme un import manuel : même
+// résolution enfant/cercle, même upsert par external_id. Un addon n'a donc pas besoin de connaître
+// la base de données de Mosaïque, seulement de retourner des éléments au même format.
+function applyAddonResult({ reservations = [], invoices = [] } = {}) {
+  const r = reservations.map((item) => {
+    const child = resolveImportChild(item);
+    return child ? upsertReservation(child.id, item) : { ok: false, error: 'Enfant introuvable.' };
+  });
+  const f = invoices.map((item) => {
+    const circle = resolveImportCircle(item);
+    return circle ? upsertInvoice(circle.id, item) : { ok: false, error: 'Cercle introuvable.' };
+  });
+  return { reservations: r, invoices: f };
+}
+async function runAddonSync(id) {
+  const addon = addonManager.find(id);
+  if (!addon) throw new HttpError(404, 'Addon inconnu.');
+  if (!addonManager.isEnabled(id)) throw new HttpError(400, "Cet addon n'est pas activé.");
+  const raw = await addon.sync(addonManager.configOf(id));
+  const applied = applyAddonResult(raw);
+  addonManager.recordSyncOk(id);
+  return applied;
+}
+// Synchronisation automatique, environ une fois par heure, de tout addon activé (voir tick()).
+// Les erreurs (site indisponible, identifiants invalides…) sont journalisées et affichées dans
+// Réglages, sans jamais interrompre le reste de Mosaïque.
+async function maybeSyncAddons() {
+  for (const a of addonManager.list()) {
+    if (!a.enabled) continue;
+    const last = a.last_sync_at ? new Date(a.last_sync_at).getTime() : 0;
+    if (Date.now() - last < 55 * 60 * 1000) continue;
+    try { await runAddonSync(a.id); } catch (e) { addonManager.recordSyncError(a.id, e.message); console.error(`Addon ${a.id} :`, e.message); }
+  }
 }
 app.post('/import/:token/homework', (req, res) => {
   if (!checkImportToken(req, res)) return;
@@ -2016,6 +2309,26 @@ app.post('/import/:token/note', (req, res) => {
     const child = resolveImportChild(item);
     if (!child) return { ok: false, error: 'Enfant introuvable.' };
     return upsertNote(child.id, item);
+  });
+  res.json({ results });
+});
+app.post('/import/:token/reservation', (req, res) => {
+  if (!checkImportToken(req, res)) return;
+  const items = Array.isArray(req.body) ? req.body : [req.body];
+  const results = items.map((item) => {
+    const child = resolveImportChild(item);
+    if (!child) return { ok: false, error: 'Enfant introuvable.' };
+    return upsertReservation(child.id, item);
+  });
+  res.json({ results });
+});
+app.post('/import/:token/facture', (req, res) => {
+  if (!checkImportToken(req, res)) return;
+  const items = Array.isArray(req.body) ? req.body : [req.body];
+  const results = items.map((item) => {
+    const circle = resolveImportCircle(item);
+    if (!circle) return { ok: false, error: 'Cercle introuvable.' };
+    return upsertInvoice(circle.id, item);
   });
   res.json({ results });
 });
@@ -2055,7 +2368,9 @@ function checkEventReminders() {
   const rows = db.prepare('SELECT * FROM events WHERE reminder_minutes IS NOT NULL').all();
   if (!rows.length) return;
   const from = nowLocal().slice(0, 10);
-  const to = addDays(from, 31); // large : un rappel peut être réglé jusqu'à 30 jours avant
+  // Le rappel le plus lointain proposé dans l'agenda est "1 semaine avant" (voir REMINDERS côté client) :
+  // pas besoin de déplier un mois d'occurrences récurrentes à chaque passage, 8 jours suffisent largement.
+  const to = addDays(from, 8);
   const nights = db.prepare('SELECT date, child_id, parent_id FROM custody_nights WHERE date BETWEEN ? AND ?').all(from, to);
   const custodyMap = {};
   for (const n of nights) custodyMap[`${n.date}|${n.child_id}`] = n.parent_id;
@@ -2067,7 +2382,10 @@ function checkEventReminders() {
     if (remindMs > now) continue; // pas encore l'heure
     if (now - startMs > 3600000) continue; // événement passé depuis plus d'une heure : trop tard, on ne relance pas après coup
     if (db.prepare('SELECT 1 FROM event_reminders_sent WHERE event_id=? AND occurrence_date=?').get(occ.id, occ.occ_date)) continue;
-    const targets = occ.owner_id ? [occ.owner_id] : circleMemberIds(occ.circle_id);
+    // occ.owner_id est déjà résolu pour cette occurrence (y compris en mode auto) par expandEvents ;
+    // on y ajoute la personne chargée du dépôt et/ou de la récupération, si elle est différente.
+    const extra = [occ.dropoff_by, occ.pickup_by].filter(Boolean);
+    const targets = (occ.owner_id || extra.length) ? [...new Set([occ.owner_id, ...extra].filter(Boolean))] : circleMemberIds(occ.circle_id);
     const when = occ.all_day ? 'Toute la journée' : occ.starts_at.replace('T', ' à ');
     notify(targets, { kind: 'event', title: `Rappel : ${occ.title}`, body: [when, occ.location].filter(Boolean).join(' · '), link: '#/agenda' });
     db.prepare('INSERT OR IGNORE INTO event_reminders_sent(event_id, occurrence_date) VALUES (?,?)').run(occ.id, occ.occ_date);
@@ -2087,6 +2405,7 @@ function tick() {
     maybeSendDailyRecap();
     checkEventReminders();
     generateRecurringExpenses();
+    maybeSyncAddons().catch((e) => console.error('maybeSyncAddons', e));
   } catch (e) { console.error('tick', e); }
 }
 

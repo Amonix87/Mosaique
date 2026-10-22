@@ -257,6 +257,11 @@ async function main() {
     kid1Info = (await alice.get('/api/me')).body.children.find((c) => c.id === kid1);
     assert.strictEqual(kid1Info.handover_location, 'École', 'le lieu reste inchangé');
     assert.strictEqual(kid1Info.handover_time, null, "l'heure a bien été effacée");
+    // Fiche santé (groupe sanguin, allergies, médecin traitant) : facultative.
+    ok(await alice.put(`/api/children/${kid1}`, { blood_type: 'XX' }), 400, 'groupe sanguin invalide refusé');
+    ok(await alice.put(`/api/children/${kid1}`, { blood_type: 'O+', allergies: 'Arachides', doctor_name: 'Dr Petit', doctor_phone: '0102030405' }), 200);
+    kid1Info = (await alice.get('/api/me')).body.children.find((c) => c.id === kid1);
+    assert.deepStrictEqual([kid1Info.blood_type, kid1Info.allergies, kid1Info.doctor_name, kid1Info.doctor_phone], ['O+', 'Arachides', 'Dr Petit', '0102030405'], 'fiche santé enregistrée');
     const kid2 = (await alice.post('/api/children', { name: 'Mia', color: '#FFC914' })).body.id;
     ok(await alice.post('/api/children', { name: 'Doublon', color: '#17BEBB' }), 400, 'couleur déjà utilisée refusée à la création');
     ok(await alice.put(`/api/children/${kid2}`, { color: '#17BEBB' }), 400, 'couleur déjà utilisée refusée à la modification');
@@ -348,7 +353,10 @@ async function main() {
     ok(await alice.post(`/api/sos/${sosId}/take`), 400, 'pas sa propre demande');
     const [t1, t2] = await Promise.all([bob.post(`/api/sos/${sosId}/take`), carla.post(`/api/sos/${sosId}/take`)]);
     assert.deepStrictEqual([t1.status, t2.status].sort(), [200, 409], 'un seul gagnant');
-    assert.strictEqual((await alice.get('/api/sos')).body[0].status, 'taken');
+    const sosDone = (await alice.get('/api/sos')).body[0];
+    assert.strictEqual(sosDone.status, 'taken');
+    assert.strictEqual(sosDone.taken_by, t1.status === 200 ? B : C, "on sait qui a pris le relais (pour l'historique)");
+    assert.ok(sosDone.taken_at, "l'horodatage de la prise en charge est renseigné");
 
     // Tâches, rappels, courses
     const task = (await alice.post('/api/tasks', { circle_id: circle, title: 'Rendez-vous dentiste', assignee_id: C, due: '2026-10-05', remind_at: '2026-01-01T08:00' })).body;
@@ -376,9 +384,26 @@ async function main() {
     ok(await carla.get(`/api/expenses/summary?circle_id=${c2}`), 403, 'cercle non partagé');
 
     // Contacts et visibilité par cercle
-    ok(await alice.post('/api/contacts', { circle_id: c2, name: 'Dr Martin', category: 'Médecin', phone: '0102030405', child_id: kid1 }));
+    ok(await alice.post('/api/contacts', { circle_ids: [c2], name: 'Dr Martin', category: 'Médecin', phone: '0102030405', child_id: kid1 }));
     assert.strictEqual((await carla.get('/api/contacts')).body.length, 0, 'contact du cercle Coparents invisible pour Carla');
     assert.strictEqual((await bob.get('/api/contacts')).body.length, 1);
+
+    // Un contact peut désormais être partagé entre plusieurs cercles à la fois.
+    const sharedContact = (await alice.post('/api/contacts', { circle_ids: [circle, c2], name: 'Pharmacie du coin' })).body;
+    assert.deepStrictEqual([...sharedContact.circle_ids].sort(), [circle, c2].sort(), 'le contact est rattaché aux deux cercles');
+    assert.ok((await carla.get('/api/contacts')).body.some((c) => c.name === 'Pharmacie du coin'), 'Carla (membre de Famille) voit le contact partagé');
+    assert.ok((await bob.get('/api/contacts')).body.some((c) => c.name === 'Pharmacie du coin'), 'Bob (membre des deux cercles) voit le contact partagé');
+    ok(await alice.put(`/api/contacts/${sharedContact.id}`, { circle_ids: [c2] }), 200, "on peut retirer un des cercles ensuite");
+    assert.ok(!(await carla.get('/api/contacts')).body.some((c) => c.name === 'Pharmacie du coin'), 'Carla ne voit plus le contact une fois retiré du cercle Famille');
+    ok(await alice.put(`/api/contacts/${sharedContact.id}`, { circle_ids: [] }), 400, 'il faut garder au moins un cercle');
+
+    // Favoris : épinglés en haut de la liste des contacts.
+    const favContact = (await alice.post('/api/contacts', { circle_ids: [circle], name: 'Pompiers' })).body;
+    assert.strictEqual(favContact.favorite, 0, 'pas favori par défaut');
+    const favUpdated = (await alice.put(`/api/contacts/${favContact.id}`, { favorite: true })).body;
+    assert.strictEqual(favUpdated.favorite, 1, 'marqué favori');
+    assert.strictEqual((await alice.get('/api/contacts')).body.find((c) => c.id === favContact.id).favorite, 1, 'le statut favori est bien renvoyé par la liste');
+    ok(await alice.put(`/api/contacts/${favContact.id}`, { favorite: false }));
 
     // Documents
     const fd = new FormData();
@@ -456,8 +481,10 @@ async function main() {
     const carlaIcs = await (await fetch(`${BASE}/ical/${carlaMe.user.ical_token}.ics`)).text();
     assert.ok(!carlaIcs.includes('SUMMARY:Foot'), 'iCal filtré par cercle');
 
-    // Présence (Home Assistant) : basée sur la nuit de garde du jour même
-    const todayStr = new Date().toISOString().slice(0, 10);
+    // Présence (Home Assistant) : basée sur la nuit de garde du jour même. Date locale (comme
+    // nowLocal() côté serveur), pas UTC : sinon le test devient faux entre minuit local et minuit UTC.
+    const todayD = new Date();
+    const todayStr = `${todayD.getFullYear()}-${String(todayD.getMonth() + 1).padStart(2, '0')}-${String(todayD.getDate()).padStart(2, '0')}`;
     ok(await alice.put('/api/custody', { date_from: todayStr, date_to: todayStr, child_ids: [kid1], parent_id: A }));
     ok(await alice.put('/api/custody', { date_from: todayStr, date_to: todayStr, child_ids: [kid2], parent_id: null }));
     let presence = await (await fetch(`${BASE}/presence/${me.user.ical_token}.json`)).json();
@@ -503,6 +530,19 @@ async function main() {
     assert.deepStrictEqual(rangeCarla.sort(), ['Anniversaire Mia', 'Loyer', 'Réunion de famille'], "Carla ne voit pas l'événement de Léo");
     ok(await bob.post('/api/events', { circle_id: circle, title: 'x', starts_at: '2026-11-08T10:00', child_ids: [kid2] }), 403, "Bob ne peut pas créer un événement pour Mia");
     ok(await bob.put(`/api/events/${evKid2.id}`, { child_ids: [kid2] }), 403, "Bob ne peut pas modifier un événement pour Mia");
+
+    // Dépôt/récupération par quelqu'un d'autre que le responsable habituel (ex. : covoiturage).
+    const evCarpool = (await alice.post('/api/events', { circle_id: circle, title: 'Foot de Léo', starts_at: '2026-11-09T17:00', child_ids: [kid1], owner_id: A, owner_mode: 'manual', dropoff_by: B, pickup_by: C })).body;
+    assert.strictEqual(evCarpool.dropoff_by, B, 'amené par Bob');
+    assert.strictEqual(evCarpool.pickup_by, C, 'récupéré par Carla');
+    assert.strictEqual((await alice.get('/api/events/range?from=2026-11-01&to=2026-11-30')).body.find((e) => e.id === evCarpool.id).owner_id, A, 'le responsable habituel ne change pas');
+    ok(await alice.put(`/api/events/${evCarpool.id}`, { dropoff_by: 999999 }), 400, "le dépôt doit être confié à quelqu'un du cercle de l'événement");
+    // Confier après coup la récupération à quelqu'un d'autre doit le prévenir (pas seulement à la création).
+    ok(await alice.put(`/api/events/${evCarpool.id}`, { pickup_by: B }), 200, 'confier la récupération à Bob à la place de Carla');
+    assert.ok((await bob.get('/api/notifications')).body.some((n) => n.title === 'Événement modifié : Foot de Léo'), 'Bob est prévenu quand on lui confie la récupération');
+    const bobModifiedCount = (await bob.get('/api/notifications')).body.filter((n) => n.title === 'Événement modifié : Foot de Léo').length;
+    ok(await alice.put(`/api/events/${evCarpool.id}`, { notes: 'Pas oublier les crampons' }), 200, 'une simple note se modifie sans notifier personne en particulier');
+    assert.strictEqual((await bob.get('/api/notifications')).body.filter((n) => n.title === 'Événement modifié : Foot de Léo').length, bobModifiedCount, "modifier juste une note n'envoie pas de notification « modifié »");
 
     ok(await alice.put('/api/custody', { date_from: '2026-11-10', date_to: '2026-11-10', child_ids: [kid1], parent_id: A }));
     ok(await alice.put('/api/custody', { date_from: '2026-11-10', date_to: '2026-11-10', child_ids: [kid2], parent_id: A }));
@@ -562,10 +602,19 @@ async function main() {
     const soon = localDT(new Date(Date.now() + 2 * 60000)); // dans 2 minutes : le rappel (1h avant) est donc déjà passé
     ok(await bob.get('/api/admin/run-checks'), 404, 'GET non défini : seul POST'); // vérifie qu'on ne déclenche pas par erreur via une méthode inattendue
     ok(await bob.post('/api/admin/run-checks'), 403, 'réservé aux administrateurs');
-    const remEv = (await alice.post('/api/events', { circle_id: circle, title: 'Rappel imminent', starts_at: soon, owner_id: B, reminder_minutes: 60 })).body;
+    const remEv = (await alice.post('/api/events', { circle_id: circle, title: 'Rappel imminent', starts_at: soon, owner_id: B, pickup_by: C, reminder_minutes: 60 })).body;
     ok(await alice.post('/api/admin/run-checks'), 200);
     assert.ok((await bob.get('/api/notifications')).body.some((n) => n.title === 'Rappel : Rappel imminent'), 'le responsable (Bob) reçoit bien le rappel');
-    assert.ok(!(await carla.get('/api/notifications')).body.some((n) => n.title === 'Rappel : Rappel imminent'), "les autres (Carla) ne le reçoivent pas");
+    assert.ok((await carla.get('/api/notifications')).body.some((n) => n.title === 'Rappel : Rappel imminent'), 'Carla (chargée de la récupération) reçoit aussi le rappel');
+
+    // Sauvegarde manuelle (admin) : une archive zip contenant une copie de la base et les fichiers envoyés.
+    ok(await bob.get('/api/admin/backup'), 403, 'réservé aux administrateurs');
+    const backup = await alice.get('/api/admin/backup');
+    assert.strictEqual(backup.status, 200);
+    assert.strictEqual(backup.headers.get('content-type'), 'application/zip');
+    assert.ok(/attachment; filename="mosaique-sauvegarde-\d{4}-\d{2}-\d{2}\.zip"/.test(backup.headers.get('content-disposition') || ''), 'nom de fichier daté');
+    assert.ok(typeof backup.body === 'string' && backup.body.length > 100, "l'archive n'est pas vide");
+    assert.ok(backup.body.startsWith('PK'), "signature zip (PK\\x03\\x04) présente en tête de fichier");
     const bobCountBefore = (await bob.get('/api/notifications')).body.filter((n) => n.title === 'Rappel : Rappel imminent').length;
     ok(await alice.post('/api/admin/run-checks'), 200);
     const bobCountAfter = (await bob.get('/api/notifications')).body.filter((n) => n.title === 'Rappel : Rappel imminent').length;
@@ -677,8 +726,8 @@ async function main() {
     ok(await alice.post('/api/custody/generate', { pattern: 'halves', child_ids: [kid1], parent_a: A, parent_b: C, start: '2026-11-14', end: '2026-11-15' }), 400, "idem pour la génération de planning");
     ok(await alice.put('/api/custody', { date_from: '2026-11-13', date_to: '2026-11-13', child_ids: [kid1], parent_id: B }), 200, 'Bob, lui, est bien un parent désigné de Léo');
 
-    ok(await alice.post('/api/contacts', { circle_id: circle, name: 'Pédiatre de Léo', child_id: kid1 }));
-    ok(await alice.post('/api/contacts', { circle_id: circle, name: 'Pédiatre de Mia', child_id: kid2 }));
+    ok(await alice.post('/api/contacts', { circle_ids: [circle], name: 'Pédiatre de Léo', child_id: kid1 }));
+    ok(await alice.post('/api/contacts', { circle_ids: [circle], name: 'Pédiatre de Mia', child_id: kid2 }));
     const contactsBob = (await bob.get('/api/contacts')).body.map((c) => c.name);
     const contactsCarla = (await carla.get('/api/contacts')).body.map((c) => c.name);
     assert.ok(contactsBob.includes('Pédiatre de Léo') && !contactsBob.includes('Pédiatre de Mia'), 'Bob ne voit pas le contact de Mia');
@@ -701,7 +750,7 @@ async function main() {
     ok(await david.put('/api/custody', { date_from: '2026-11-15', date_to: '2026-11-15', child_ids: [kid1], parent_id: davidId }), 403, 'David ne peut pas modifier la garde de Léo');
     ok(await david.post('/api/custody/generate', { pattern: 'halves', child_ids: [kid1], parent_a: A, parent_b: B, start: '2026-11-20', end: '2026-11-21' }), 403, 'David ne peut pas générer un planning pour Léo');
     assert.ok((await david.get('/api/contacts')).body.some((c) => c.name === 'Pédiatre de Léo'), 'David voit le contact de Léo');
-    ok(await david.post('/api/contacts', { circle_id: circle, name: 'x', child_id: kid1 }), 403, 'David ne peut pas créer un contact pour Léo');
+    ok(await david.post('/api/contacts', { circle_ids: [circle], name: 'x', child_id: kid1 }), 403, 'David ne peut pas créer un contact pour Léo');
     ok(await david.del(`/api/events/${evKid1.id}`), 403, 'David ne peut pas supprimer un événement de Léo');
     // Un simple événement général (sans enfant précis) reste créable par David, comme tout membre du cercle.
     ok(await david.post('/api/events', { circle_id: circle, title: 'Barbecue', starts_at: '2026-11-09T18:00' }), 200, 'David peut créer un événement général');
@@ -1001,6 +1050,69 @@ async function main() {
     const noteId = notesForBob[0].id;
     ok(await david.put(`/api/notes/${noteId}`, { read: true }), 200, "un lecteur peut marquer un mot comme lu (ce n'est pas une donnée scolaire modifiée)");
     ok(await david.del(`/api/notes/${noteId}`), 403, 'mais pas le supprimer');
+
+    // Réservations et factures périscolaires (addon e-portail) : même jeton famille, même logique
+    // d'upsert par external_id ; les réservations suivent la visibilité par enfant, les factures
+    // sont rattachées au cercle (un seul cercle ici → résolu automatiquement sans le préciser).
+    ok(await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'Garderie matin', date: '2026-11-10', start_time: '07:30', end_time: '08:30', status: 'confirmée', external_id: 'eportail-r1' }), 200, 'import réservation');
+    const resaBatch = await anon.call('POST', `/import/${schoolToken}/reservation`, [
+      { child: 'Léo', title: 'Garderie matin', date: '2026-11-10', start_time: '07:30', end_time: '08:30', status: 'annulée', external_id: 'eportail-r1' }, // même external_id → mise à jour
+      { child: 'Mia', title: 'Cantine', date: '2026-11-10', external_id: 'eportail-r2' },
+      { child: 'Inconnu', title: 'x', date: '2026-11-10' },
+    ]);
+    assert.deepStrictEqual(resaBatch.body.results.map((r) => r.ok), [true, true, false], 'lot mixte réservations : succès, succès, enfant introuvable');
+    assert.strictEqual(resaBatch.body.results[0].updated, true, "l'import réutilise le même external_id (pas de doublon)");
+    ok(await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'x', date: 'pas une date' }), 200, 'date invalide : réponse 200 avec erreur dans le résultat');
+    const resaForBob = (await bob.get('/api/reservations')).body;
+    assert.ok(resaForBob.some((r) => r.child_id === kid1 && r.status === 'annulée'), 'Bob voit la réservation de Léo, mise à jour');
+    assert.ok(!resaForBob.some((r) => r.child_id === kid2), 'Bob ne voit pas les réservations de Mia');
+    const resaForCarla = (await carla.get('/api/reservations')).body;
+    assert.ok(resaForCarla.some((r) => r.child_id === kid2) && !resaForCarla.some((r) => r.child_id === kid1), 'Carla ne voit que les réservations de Mia');
+    const leoResaId = resaForBob.find((r) => r.child_id === kid1).id;
+    ok(await david.del(`/api/reservations/${leoResaId}`), 403, "David (lecteur de Léo) ne peut pas supprimer sa réservation");
+    ok(await bob.del(`/api/reservations/${leoResaId}`), 200, 'Bob (parent) peut supprimer une réservation de Léo');
+
+    // Plusieurs cercles existent ('Les Test' et 'Coparents') : sans précision, le cercle est ambigu.
+    assert.strictEqual((await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'x', number: 'y', date: '2026-11-01', amount: 10 })).body.results[0].error, 'Cercle introuvable.', 'facture sans cercle précisé, plusieurs cercles existants → erreur');
+    ok(await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine novembre', number: 'F-2026-11', date: '2026-11-01', due_date: '2026-11-30', amount: 42.5, status: 'à payer', circle: 'Famille', external_id: 'eportail-f1' }), 200, 'import facture (cercle précisé par son nom)');
+    const facBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine novembre', number: 'F-2026-11', date: '2026-11-01', amount: 42.5, status: 'payée', circle_id: circle, external_id: 'eportail-f1' });
+    assert.strictEqual(facBatch.body.results[0].updated, true, "l'import de facture réutilise le même external_id");
+    const invForBob = (await bob.get('/api/invoices')).body;
+    const fac1 = invForBob.find((i) => i.number === 'F-2026-11');
+    assert.ok(fac1, 'Bob (membre du cercle) voit la facture');
+    assert.strictEqual(fac1.amount_cents, 4250, 'le montant en euros est bien converti en centimes');
+    assert.strictEqual(fac1.status, 'payée', 'le statut a bien été mis à jour');
+    assert.ok((await carla.get('/api/invoices')).body.some((i) => i.id === fac1.id), 'Carla (même cercle) voit aussi la facture');
+    ok(await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'x', number: 'y', date: '2026-11-01', amount: -5 }), 200, 'montant invalide : réponse 200 avec erreur dans le résultat');
+    assert.strictEqual((await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'x', number: 'y', date: '2026-11-01', amount: -5 })).body.results[0].ok, false, "montant négatif rejeté par l'upsert");
+
+    // Addons de réservation périscolaire (Réglages → Administration → « Modules complémentaires ») :
+    // configuration admin-only, mot de passe jamais renvoyé en clair, synchronisation déclenchée manuellement.
+    ok(await bob.get('/api/addons'), 403, "un non-admin n'a pas accès aux addons");
+    const addonsList = (await alice.get('/api/addons')).body;
+    const eportail = addonsList.find((a) => a.id === 'eportail');
+    assert.ok(eportail, "l'addon e-portail est bien découvert");
+    assert.strictEqual(eportail.enabled, false, 'désactivé par défaut');
+    assert.strictEqual(eportail.config.password, false, "aucun mot de passe enregistré au départ");
+    ok(await bob.put('/api/addons/eportail', { enabled: true }), 403, "un non-admin ne peut pas configurer un addon");
+    ok(await alice.put('/api/addons/inconnu', { enabled: true }), 404, 'addon inconnu');
+    // Sans activation préalable, une tentative de synchronisation est refusée avant tout appel réseau.
+    ok(await alice.post('/api/addons/eportail/sync'), 400, "synchronisation refusée : addon pas encore activé");
+    const saved1 = (await alice.put('/api/addons/eportail', { enabled: true, config: { url: 'https://invalid.example.invalid/Commune', username: 'parent1', password: 'secret123' } })).body;
+    assert.strictEqual(saved1.enabled, true);
+    assert.strictEqual(saved1.config.url, 'https://invalid.example.invalid/Commune', "l'URL n'est pas un secret : renvoyée telle quelle");
+    assert.strictEqual(saved1.config.username, 'parent1');
+    assert.strictEqual(saved1.config.password, true, 'mot de passe renseigné : seulement un booléen, jamais la valeur');
+    // Un mot de passe vide lors d'une mise à jour ultérieure laisse l'ancien inchangé (comme le SMTP).
+    const saved2 = (await alice.put('/api/addons/eportail', { enabled: true, config: { url: 'https://invalid.example.invalid/Commune', username: 'parent1', password: '' } })).body;
+    assert.strictEqual(saved2.config.password, true, "mot de passe vide à la mise à jour : l'ancien reste en place");
+    // La synchronisation réelle nécessite le vrai portail (hors de portée de ce test) : on vérifie
+    // seulement qu'un échec réseau remonte une erreur claire plutôt qu'un faux succès, et qu'elle
+    // est journalisée pour être visible dans Réglages.
+    const syncFail = await alice.post('/api/addons/eportail/sync');
+    assert.ok(syncFail.status >= 400, "un portail injoignable remonte une erreur, jamais un faux succès");
+    const afterFail = (await alice.get('/api/addons')).body.find((a) => a.id === 'eportail');
+    assert.ok(afterFail.last_error, "l'échec est journalisé et visible dans Réglages");
 
     // Notifications push (Web Push) : abonnement, envoi réel (chiffré) vers un faux service local,
     // désabonnement, et nettoyage automatique d'un abonnement expiré (410).

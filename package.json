@@ -9,8 +9,10 @@
   },
   "license": "MIT",
   "dependencies": {
+    "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.10.0",
+    "cheerio": "^1.0.0",
     "express": "^5.2.1",
     "multer": "^2.4.0",
     "nodemailer": "^10.0.10",
