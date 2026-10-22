@@ -96,22 +96,37 @@ async function login(client, baseUrl, username, password) {
 }
 
 /* ───────────────────────── Réservations ─────────────────────────
-   La page de planning embarque les événements comme un littéral JS renvoyé par une fonction
-   getEventsList(), pas via un vrai appel JSON séparé. On extrait ce littéral et on l'évalue (sans
-   risque : c'est une page de notre propre session authentifiée, pas un contenu tiers non fiable),
-   plutôt que de le parser comme du JSON strict (les clés n'y sont pas forcément citées). */
+   La page de planning embarque une fonction getEventsList() entière dans son HTML (pas un vrai
+   appel JSON séparé) : elle remplit un tableau au fil d'instructions (`events.push(...)`) plutôt
+   que de renvoyer un littéral [...] tout fait. On extrait donc le CODE de la fonction (en comptant
+   les accolades pour trouver où elle se termine, le nom de la variable interne n'étant pas garanti),
+   puis on l'exécute et on l'appelle (sans risque : c'est une page de notre propre session
+   authentifiée, pas un contenu tiers non fiable). */
+function extractFunctionSource(html, name) {
+  const start = new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{`).exec(html);
+  if (!start) return null;
+  let i = start.index + start[0].length;
+  let depth = 1;
+  while (depth > 0 && i < html.length) {
+    if (html[i] === '{') depth++;
+    else if (html[i] === '}') depth--;
+    i++;
+  }
+  return depth === 0 ? html.slice(start.index, i) : null;
+}
+
 async function fetchReservations(client, baseUrl) {
   const res = await client.request(`${baseUrl}/activites/planning`);
-  const m = /getEventsList\s*\([^)]*\)\s*\{[\s\S]*?return\s*(\[[\s\S]*?\]);/.exec(res.body);
-  if (!m) {
+  const src = extractFunctionSource(res.body, 'getEventsList');
+  if (!src) {
     throw new Error("Fonction getEventsList() introuvable sur /activites/planning — la page a changé de structure (voir server/addons/README.md).");
   }
   let raw;
   try {
-    // Littéral JS de confiance (notre propre session authentifiée), pas du JSON strict.
-    raw = new Function(`return (${m[1]});`)();
+    const fn = new Function(`return (${src});`)();
+    raw = fn();
   } catch (e) {
-    throw new Error(`Le contenu de getEventsList() n'a pas pu être interprété : ${e.message}`);
+    throw new Error(`Le contenu de getEventsList() n'a pas pu être exécuté : ${e.message}`);
   }
   return Array.isArray(raw) ? raw : [];
 }
@@ -152,19 +167,24 @@ function parseAmount(s) {
   return m ? Number(m[1].replace(/\s/g, '').replace(',', '.')) : null;
 }
 
+// Ignore les accents pour comparer les intitulés de colonnes ("Echéance" sans accent sur le E
+// mais avec un accent sur le é, par exemple) plutôt que de devoir lister toutes les variantes.
+const stripAccents = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
 async function fetchInvoices(client, baseUrl, circleId) {
   const items = [];
   for (let page = 0; page < 50; page++) {
-    const url = `${baseUrl}/espace_facturation/historique${page ? `?page=${page}` : ''}`;
+    // pageNumber est 0-indexé (observé sur un portail réel) ; pageSize élevé pour limiter le nombre de requêtes.
+    const url = `${baseUrl}/espace_facturation/historique?pageNumber=${page}&pageSize=50`;
     const res = await client.request(url);
     const $ = cheerio.load(res.body);
     const table = $('table').first();
     if (!table.length) break;
 
     const headerCells = table.find('thead th').length ? table.find('thead th') : table.find('tr').first().find('th,td');
-    const headers = headerCells.map((_, th) => $(th).text().trim().toLowerCase()).get();
-    const col = (names) => headers.findIndex((h) => names.some((n) => h.includes(n)));
-    const idx = { date: col(['date']), number: col(['numéro', 'numero', 'n°', 'facture']), due: col(['échéance', 'echeance']), amount: col(['montant']), status: col(['statut', 'état', 'etat']) };
+    const headers = headerCells.map((_, th) => stripAccents($(th).text().trim())).get();
+    const col = (names) => headers.findIndex((h) => names.some((n) => h.includes(stripAccents(n))));
+    const idx = { date: col(['date']), number: col(['numero', 'n°', 'facture']), due: col(['echeance']), amount: col(['montant']), status: col(['statut', 'etat']) };
 
     const rows = table.find('tbody tr').toArray();
     if (!rows.length) break;
