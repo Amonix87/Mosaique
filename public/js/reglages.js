@@ -103,11 +103,16 @@ export async function reglages(root) {
         h('div', { class: 'row gap wrap' },
           h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer'),
           a.enabled ? h('button', { class: 'btn small', type: 'button', onclick: () => act(async () => {
-            const r = await post(`/addons/${a.id}/sync`, {});
-            const nOk = (r.reservations || []).filter((x) => x.ok).length + (r.invoices || []).filter((x) => x.ok).length;
-            const nErr = (r.reservations || []).filter((x) => !x.ok).length + (r.invoices || []).filter((x) => !x.ok).length;
-            toast(`Synchronisation : ${nOk} élément(s) importé(s)${nErr ? `, ${nErr} erreur(s)` : ''}`);
-            addonsList = await get('/addons'); draw();
+            try {
+              const r = await post(`/addons/${a.id}/sync`, {});
+              const nOk = (r.reservations || []).filter((x) => x.ok).length + (r.invoices || []).filter((x) => x.ok).length;
+              const nErr = (r.reservations || []).filter((x) => !x.ok).length + (r.invoices || []).filter((x) => !x.ok).length;
+              toast(`Synchronisation : ${nOk} élément(s) importé(s)${nErr ? `, ${nErr} erreur(s)` : ''}`);
+            } finally {
+              // Même en cas d'échec : la dernière erreur, elle, reste affichée tant qu'on ne
+              // resynchronise pas avec succès (contrairement au toast, qu'on peut manquer).
+              addonsList = await get('/addons'); draw();
+            }
           }) }, 'Synchroniser maintenant') : null)),
       a.last_sync_at ? h('p', { class: 'hint' }, `Dernière synchronisation : ${new Date(a.last_sync_at).toLocaleString('fr-FR')}`) : null,
       a.last_error ? h('p', { class: 'form-error' }, `Dernière erreur : ${a.last_error}`) : null);

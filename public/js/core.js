@@ -140,7 +140,10 @@ export const emitChat = (m) => chatHandler && chatHandler(m);
 export function toast(msg, isError = false) {
   const t = h('div', { class: 'toast' + (isError ? ' err' : ''), role: isError ? 'alert' : 'status' }, msg);
   document.body.append(t);
-  setTimeout(() => t.remove(), isError ? 5000 : 2600);
+  // Un message d'erreur reste affiché jusqu'à ce qu'on clique dessus (le temps de le lire, de le
+  // sélectionner et de le copier si besoin) plutôt que de disparaître tout seul après 5 secondes.
+  if (isError) t.addEventListener('click', () => t.remove());
+  else setTimeout(() => t.remove(), 2600);
 }
 export async function act(fn) {
   try { return await fn(); } catch (e) { toast(e.message, true); }

@@ -188,7 +188,9 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 
 /* ── Notifications toast ── */
 .toast { position: fixed; bottom: calc(72px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--paper); padding: .6rem 1rem; border-radius: var(--radius-sm); font-size: .88rem; z-index: 100; box-shadow: var(--shadow); max-width: 90vw; pointer-events: none; }
-.toast.err { background: var(--danger); }
+/* Une erreur reste à l'écran jusqu'au clic (voir toast() dans core.js) : contrairement aux toasts
+   normaux, elle doit pouvoir être sélectionnée et copiée, donc elle réactive les événements. */
+.toast.err { background: var(--danger); pointer-events: auto; user-select: text; cursor: pointer; white-space: pre-wrap; text-align: left; }
 @media (min-width: 860px) { .toast { bottom: 1.2rem; } }
 
 /* ── Agenda ── */
