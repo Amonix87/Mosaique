@@ -27,6 +27,9 @@ Tout tourne sur votre serveur : aucune donnée n'est envoyée à un tiers.
 
 Prérequis : [Docker](https://docs.docker.com/get-docker/) et Docker Compose.
 
+Téléchargez seulement `docker-compose.yml` (pas besoin de cloner tout le dépôt : il construit
+directement depuis GitHub), puis :
+
 ```bash
 docker compose up -d
 ```
@@ -38,10 +41,14 @@ Les données (base SQLite + fichiers envoyés) sont stockées dans un volume Doc
 ### Mettre à jour
 
 ```bash
-docker compose pull   # si vous utilisez une image publiée
-docker compose build  # si vous construisez depuis les sources
+docker compose build --no-cache   # récupère la dernière version depuis GitHub
 docker compose up -d
 ```
+
+Si vous avez gardé un clone local et utilisez `build: .` dans votre `docker-compose.yml` (voir le
+commentaire dans le fichier), faites d'abord `git pull` avant de reconstruire. Et si vous utilisez
+une image publiée sur un registre plutôt qu'une construction depuis les sources, `docker compose
+pull` suffit.
 
 ## Installation sans Docker
 
