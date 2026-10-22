@@ -131,6 +131,19 @@ async function fetchReservations(client, baseUrl) {
   return Array.isArray(raw) ? raw : [];
 }
 
+// La page de planning liste TOUTES les activités auxquelles l'enfant est inscrit pour chaque
+// créneau — y compris celles qu'on n'a pas réservées ce jour-là (visibles en gris, « Non réservé »)
+// et une variante « ... HORS DELAI » de chaque activité (demande tardive), qu'on ait réservé ou
+// non. Seul le champ etatPresence dit si CE jour précis a réellement été réservé :
+//   - "RESERVATION_OK" (ou toute variante préfixée "RESERVATION") : réservé — coche verte sur le
+//     portail.
+//   - "INSCRIPTION_OK" : simplement inscrit à l'activité, mais rien réservé pour ce jour — ne doit
+//     surtout pas remonter comme une réservation (c'était le bug : tout remontait, y compris les
+//     dizaines de créneaux "Non réservé" de chaque semaine).
+function isReserved(e) {
+  return /^RESERVATION/i.test(String(e.etatPresence || e.statut || ''));
+}
+
 function normalizeReservation(e) {
   const start = String(e.start || '');
   const end = e.end ? String(e.end) : '';
@@ -146,12 +159,17 @@ function normalizeReservation(e) {
   };
 }
 
-function withinWindow(dateStr) {
-  if (!dateStr) return false;
-  const d = new Date(`${dateStr}T00:00:00`);
+function windowBounds() {
   const now = new Date(); now.setHours(0, 0, 0, 0);
   const min = new Date(now); min.setDate(min.getDate() - DAYS_BEFORE);
   const max = new Date(now); max.setDate(max.getDate() + DAYS_AFTER);
+  const ymd = (d) => d.toISOString().slice(0, 10);
+  return { min, max, from: ymd(min), to: ymd(max) };
+}
+function withinWindow(dateStr) {
+  if (!dateStr) return false;
+  const d = new Date(`${dateStr}T00:00:00`);
+  const { min, max } = windowBounds();
   return d >= min && d <= max;
 }
 
@@ -223,9 +241,13 @@ module.exports = {
     }
     const client = makeClient();
     await login(client, baseUrl, config.username, config.password);
-    const reservations = (await fetchReservations(client, baseUrl)).map(normalizeReservation)
+    const reservations = (await fetchReservations(client, baseUrl)).filter(isReserved).map(normalizeReservation)
       .filter((r) => r.child && r.date && withinWindow(r.date));
     const invoices = (await fetchInvoices(client, baseUrl, config.circle)).filter((i) => i.date && i.number && i.amount != null);
-    return { reservations, invoices };
+    // Fenêtre couverte par cette synchronisation : permet au serveur de supprimer les réservations
+    // devenues obsolètes (annulées depuis, ou — avant la correction du filtre ci-dessus —
+    // importées par erreur alors qu'elles n'étaient en fait pas réservées).
+    const { from, to } = windowBounds();
+    return { reservations, invoices, reservationsWindow: { source: 'eportail', from, to } };
   },
 };

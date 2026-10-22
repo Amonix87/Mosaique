@@ -117,8 +117,7 @@ export async function ecole(root) {
     const box = h('div', { class: 'stack' },
       h('ul', { class: 'task-list' }, items.map((r) => h('li', { class: 'task-row' },
         h('div', { class: 'task-main' },
-          h('span', { class: 'task-title' }, r.title, r.start_time ? ` (${r.start_time}${r.end_time ? '–' + r.end_time : ''})` : ''),
-          r.status ? h('span', { class: 'muted' }, r.status) : null),
+          h('span', { class: 'task-title' }, r.title, r.start_time ? ` (${r.start_time}${r.end_time ? '–' + r.end_time : ''})` : '')),
         h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => {
           if (await confirmBox(`Supprimer « ${r.title} » ?`)) act(async () => { await del(`/reservations/${r.id}`); close(); load(); });
         } }, icon('trash', 16))))));

@@ -2313,11 +2313,24 @@ function checkImportToken(req, res) {
 // Applique le résultat d'un addon (server/addons/*.js) exactement comme un import manuel : même
 // résolution enfant/cercle, même upsert par external_id. Un addon n'a donc pas besoin de connaître
 // la base de données de Mosaïque, seulement de retourner des éléments au même format.
-function applyAddonResult({ reservations = [], invoices = [] } = {}) {
+function applyAddonResult({ reservations = [], invoices = [], reservationsWindow } = {}) {
   const r = reservations.map((item) => {
     const child = resolveImportChild(item);
     return child ? upsertReservation(child.id, item) : { ok: false, error: 'Enfant introuvable.' };
   });
+  // Un addon qui déclare la fenêtre de dates qu'il vient de couvrir (reservationsWindow) nous
+  // permet de supprimer ce qui n'y figure plus — annulé depuis la dernière synchronisation, ou (cas
+  // qui a motivé cet ajout) importé par erreur par une version antérieure de l'addon. Sans cette
+  // déclaration explicite, on ne supprime rien : un import manuel ou un addon plus simple peut très
+  // bien ne renvoyer qu'un sous-ensemble sans que le reste soit pour autant obsolète.
+  if (reservationsWindow && reservationsWindow.source && reservationsWindow.from && reservationsWindow.to) {
+    const keep = new Set(reservations.filter((it) => it.source === reservationsWindow.source && it.external_id).map((it) => it.external_id));
+    const stale = db.prepare('SELECT id, external_id FROM school_reservations WHERE source=? AND date>=? AND date<=?')
+      .all(reservationsWindow.source, reservationsWindow.from, reservationsWindow.to);
+    for (const row of stale) {
+      if (!row.external_id || !keep.has(row.external_id)) db.prepare('DELETE FROM school_reservations WHERE id=?').run(row.id);
+    }
+  }
   const f = invoices.map((item) => {
     const circle = resolveImportCircle(item);
     return circle ? upsertInvoice(circle.id, item) : { ok: false, error: 'Cercle introuvable.' };
