@@ -592,8 +592,20 @@ if (invoiceCols2.find((c) => c.name === 'circle_id')?.notnull) {
       SELECT id, circle_id, label, number, date, due_date, amount_cents, status, source, external_id, assigned_to, expense_id, created_at, updated_at FROM invoices;
     DROP TABLE invoices;
     ALTER TABLE invoices_new RENAME TO invoices;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_ext ON invoices(circle_id, source, external_id) WHERE external_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_ext ON invoices(source, external_id) WHERE external_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_invoices_circle_date ON invoices(circle_id, date);
+  `);
+}
+// Correction du correctif ci-dessus : l'identifiant d'une facture est unique par (source,
+// external_id) TOUT COURT, jamais par cercle — circle_id est une attribution de notre côté, pas une
+// donnée du portail, et une fois corrigée à la main (PUT /invoices/:id/attribute), une synchronisation
+// suivante qui devine toujours le même cercle (ou toujours aucun) ne doit jamais créer de doublon.
+// Une base déjà migrée par le bloc ci-dessus avant ce correctif a encore l'ancien index : on la répare.
+const invoicesExtIdx = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_invoices_ext'").get();
+if (invoicesExtIdx && /circle_id/.test(invoicesExtIdx.sql)) {
+  db.exec(`
+    DROP INDEX idx_invoices_ext;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_ext ON invoices(source, external_id) WHERE external_id IS NOT NULL;
   `);
 }
 

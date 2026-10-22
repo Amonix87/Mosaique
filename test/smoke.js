@@ -1099,6 +1099,17 @@ async function main() {
     const orphanPaid = (await bob.put(`/api/invoices/${orphanId}/assign`, { assigned_to: B, paid: true, date: '2026-11-02' })).body;
     const orphanExpense = (await bob.get('/api/expenses')).body.find((e) => e.id === orphanPaid.expense_id);
     assert.strictEqual(orphanExpense.child_id, kid2, "l'enfant attribué à la facture se retrouve sur la dépense créée une fois payée");
+    // Un cycle de synchronisation suivant qui revoit la même facture (même external_id), sans
+    // deviner de cercle cette fois non plus, ne doit surtout pas créer un doublon ni effacer
+    // l'attribution déjà faite à la main (bug observé : la correspondance se faisait par cercle+id,
+    // qui ne retrouvait plus la ligne une fois son cercle changé).
+    const reimportBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Facture mystère (màj)', number: 'ZZZ', date: '2026-11-01', amount: 10, external_id: 'eportail-orphan' });
+    assert.strictEqual(reimportBatch.body.results[0].id, orphanId, 'même facture (même external_id) reconnue, pas un doublon, même sans cercle deviné');
+    const reimported = (await bob.get('/api/invoices')).body.find((i) => i.id === orphanId);
+    assert.strictEqual(reimported.circle_id, circle, "le cercle attribué à la main n'est pas effacé par la resynchronisation");
+    assert.strictEqual(reimported.child_id, kid2, "l'enfant non plus");
+    assert.strictEqual(reimported.label, 'Facture mystère (màj)', 'les informations venant réellement du portail, elles, sont mises à jour');
+    assert.strictEqual((await alice.get('/api/invoices')).body.filter((i) => i.number === 'ZZZ').length, 1, 'toujours une seule ligne pour cette facture');
 
     ok(await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine novembre', number: 'F-2026-11', date: '2026-11-01', due_date: '2026-11-30', amount: 42.5, status: 'à payer', circle: 'Famille', external_id: 'eportail-f1' }), 200, 'import facture (cercle précisé par son nom)');
     const facBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine novembre', number: 'F-2026-11', date: '2026-11-01', amount: 42.5, status: 'payée', circle_id: circle, external_id: 'eportail-f1' });

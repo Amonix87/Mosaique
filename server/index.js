@@ -2335,10 +2335,14 @@ function upsertInvoice(circleId, childId, item) {
   const due = item.due_date && validDate(item.due_date) ? item.due_date : null;
   const status = item.status ? String(item.status).trim().slice(0, 80) : null;
   const extId = item.external_id ? String(item.external_id).slice(0, 200) : null;
+  // La correspondance se fait par (source, external_id) SEUL, sans le cercle : circle_id (comme
+  // child_id) est une attribution de notre côté, pas une donnée du portail, et peut avoir été
+  // corrigée à la main depuis (voir PUT /invoices/:id/attribute) — une synchronisation suivante qui
+  // deviné le même cercle (ou toujours aucun) ne doit jamais créer une seconde ligne pour la même
+  // facture. On ne touche donc jamais circle_id/child_id lors d'une mise à jour, seulement les
+  // informations qui viennent réellement du portail.
   if (extId) {
-    const existing = circleId == null
-      ? db.prepare('SELECT id FROM invoices WHERE circle_id IS NULL AND source=? AND external_id=?').get(src, extId)
-      : db.prepare('SELECT id FROM invoices WHERE circle_id=? AND source=? AND external_id=?').get(circleId, src, extId);
+    const existing = db.prepare('SELECT id FROM invoices WHERE source=? AND external_id=?').get(src, extId);
     if (existing) {
       db.prepare("UPDATE invoices SET label=?, number=?, date=?, due_date=?, amount_cents=?, status=?, updated_at=datetime('now') WHERE id=?")
         .run(label, number, item.date, due, amountCents, status, existing.id);
