@@ -1086,6 +1086,31 @@ async function main() {
     ok(await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'x', number: 'y', date: '2026-11-01', amount: -5 }), 200, 'montant invalide : réponse 200 avec erreur dans le résultat');
     assert.strictEqual((await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'x', number: 'y', date: '2026-11-01', amount: -5 })).body.results[0].ok, false, "montant négatif rejeté par l'upsert");
 
+    // Attribution des factures en attente (Budget) : à quelqu'un qui va payer (reste en attente, hors
+    // des comptes), ou qui a déjà payé (crée une vraie dépense partagée, qui la fait sortir de « en attente »).
+    assert.strictEqual(fac1.expense_id, null, "une facture importée démarre « en attente », sans dépense liée");
+    assert.strictEqual(fac1.assigned_to, null, 'et non attribuée');
+    ok(await bob.put(`/api/invoices/${fac1.id}/assign`, { assigned_to: 999999 }), 400, 'le payeur doit faire partie du cercle');
+    const assigned = (await bob.put(`/api/invoices/${fac1.id}/assign`, { assigned_to: B })).body;
+    assert.strictEqual(assigned.assigned_to, B, 'la facture est attribuée à Bob, qui va la payer');
+    assert.strictEqual(assigned.expense_id, null, 'mais reste en attente (pas encore payée)');
+    assert.ok(!(await alice.get('/api/expenses')).body.some((e) => e.title.includes('Cantine novembre')), "aucune dépense créée tant que ce n'est que « va payer »");
+    const paidInv = (await alice.put(`/api/invoices/${fac1.id}/assign`, { assigned_to: C, paid: true, date: '2026-11-05' })).body;
+    assert.ok(paidInv.expense_id, 'marquer payée crée bien une dépense liée');
+    assert.strictEqual(paidInv.assigned_to, C, 'attribuée à Carla, qui a payé (réattribution possible tant que ce n\'est pas encore payé)');
+    const facExpense = (await bob.get('/api/expenses')).body.find((e) => e.id === paidInv.expense_id);
+    assert.ok(facExpense, 'la dépense correspondante apparaît dans Budget, visible par tout le cercle');
+    assert.strictEqual(facExpense.paid_by, C);
+    assert.strictEqual(facExpense.amount_cents, 4250);
+    assert.strictEqual(facExpense.date, '2026-11-05');
+    assert.strictEqual(facExpense.category, 'Cantine');
+    assert.deepStrictEqual(Object.keys(facExpense.split).map(Number).sort((x, y) => x - y), [A, B, C, davidId].sort((x, y) => x - y), 'partagée à égalité entre tout le cercle (facture non rattachée à un enfant)');
+    ok(await bob.put(`/api/invoices/${fac1.id}/assign`, { assigned_to: B, paid: true }), 400, 'une facture déjà payée ne se réattribue plus directement (passer par Budget)');
+    ok(await alice.del(`/api/expenses/${paidInv.expense_id}`), 200, 'supprimer la dépense depuis Budget');
+    const revived = (await bob.get('/api/invoices')).body.find((i) => i.id === fac1.id);
+    assert.strictEqual(revived.expense_id, null, 'supprimer la dépense redonne automatiquement la facture en attente');
+    assert.strictEqual(revived.assigned_to, C, 'toujours attribuée à Carla, juste de nouveau non payée');
+
     // Addons de réservation périscolaire (Réglages → Administration → « Modules complémentaires ») :
     // configuration admin-only, mot de passe jamais renvoyé en clair, synchronisation déclenchée manuellement.
     ok(await bob.get('/api/addons'), 403, "un non-admin n'a pas accès aux addons");

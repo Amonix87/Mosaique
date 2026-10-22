@@ -875,6 +875,19 @@ function syncEventExpense(before, after, userId) {
   emitTo(circleMemberIds(after.circle_id), { type: 'refresh', what: 'expenses' });
 }
 
+// Facture périscolaire (reçue par addon, voir applyAddonResult) → dépense partagée dans Budget,
+// une fois attribuée à la personne qui l'a payée. Partage égal entre tout le cercle (une facture de
+// cantine/garderie n'est pas rattachée à un enfant précis). Tant que ce n'est pas fait, la facture
+// reste « en attente » (voir /invoices/:id/assign) et n'entre pas dans les comptes.
+function createExpenseForInvoice(inv, payerId, date, userId) {
+  const members = circleMemberIds(inv.circle_id);
+  const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,created_by) VALUES(?,?,?,?,?,?,?,?)')
+    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'Cantine', date, payerId, JSON.stringify(equalSplit(members)), userId);
+  db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
+  emitTo(members, { type: 'refresh', what: 'expenses' });
+  return r.lastInsertRowid;
+}
+
 // Qui doit être prévenu pour un événement donné : le responsable désigné (manuel, ou déterminé par
 // la garde du jour en mode auto) plus, s'ils sont différents, les personnes chargées du dépôt et/ou
 // de la récupération (covoiturage, SOS ponctuel) ; sans responsable identifiable, tout le cercle.
@@ -1353,8 +1366,31 @@ api.delete('/invoices/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
   if (!row) throw new HttpError(404, 'Introuvable.');
   requireMember(req.user, row.circle_id);
+  if (row.expense_id) db.prepare('DELETE FROM expenses WHERE id=?').run(row.expense_id);
   db.prepare('DELETE FROM invoices WHERE id=?').run(row.id);
   res.json({ ok: true });
+});
+// Attribution d'une facture en attente : à quelqu'un qui va la payer (paid=false, reste en attente,
+// réattribuable), ou qui l'a déjà payée (paid=true, crée la dépense partagée correspondante — voir
+// createExpenseForInvoice). Une fois payée, elle quitte « en attente » ; pour l'annuler, on
+// supprime la dépense dans Budget, ce qui (grâce à expense_id ON DELETE SET NULL) redonne
+// automatiquement la facture en attente — toujours attribuée à la même personne, juste non payée.
+api.put('/invoices/:id/assign', (req, res) => {
+  const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
+  if (!row) throw new HttpError(404, 'Introuvable.');
+  requireMember(req.user, row.circle_id);
+  if (row.expense_id) throw new HttpError(400, 'Cette facture est déjà payée : pour revenir en arrière, supprimez la dépense correspondante dans Budget.');
+  const b = req.body || {};
+  const payerId = Number(b.assigned_to);
+  if (!circleMemberIds(row.circle_id).includes(payerId)) throw bad('Le payeur doit faire partie du cercle.');
+  if (b.paid) {
+    const date = validDate(b.date) ? b.date : nowLocal().slice(0, 10);
+    createExpenseForInvoice(row, payerId, date, req.user.id);
+  } else {
+    db.prepare('UPDATE invoices SET assigned_to=? WHERE id=?').run(payerId, row.id);
+    emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'invoices' });
+  }
+  res.json(db.prepare('SELECT * FROM invoices WHERE id=?').get(row.id));
 });
 
 api.get('/settings/integration-token', requireAdmin, (req, res) => {

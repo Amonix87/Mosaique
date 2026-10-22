@@ -121,6 +121,24 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
   });
 }
 
+/* ── Attribution d'une facture périscolaire en attente (voir Réglages → Modules complémentaires) :
+   à quelqu'un qui va la payer, ou qui l'a déjà payée (ce qui la fait basculer dans l'historique
+   comme une dépense ordinaire, partagée à égalité entre les membres du cercle). ── */
+function invoiceAssignForm({ invoice, circleId, done }) {
+  const members = membersOfCircle(circleId);
+  formModal('Attribuer la facture', [
+    { name: '_info', node: h('p', { class: 'muted' }, `${invoice.label} — ${invoice.number} · ${euro(invoice.amount_cents)}`), get: () => null },
+    { name: 'assigned_to', label: 'Qui règle cette facture', type: 'select', value: invoice.assigned_to || state.me.user.id, options: members.map((id) => opt(id, userName(id))) },
+    { name: 'paid', label: 'Déjà payée', type: 'checkbox', value: false },
+    { name: 'date', label: 'Date du paiement', type: 'date', value: today(), hint: 'Utilisée seulement si « déjà payée » est cochée.' },
+  ], {
+    onSubmit: async (v, close) => {
+      await put(`/invoices/${invoice.id}/assign`, { assigned_to: Number(v.assigned_to), paid: !!v.paid, date: v.date });
+      close(); toast(v.paid ? 'Facture marquée payée' : 'Facture attribuée'); done();
+    },
+  });
+}
+
 /* ── Ligne de remboursement : X a rendu Y euros à Z (montant libre, donc éventuellement partiel) ── */
 function settlementForm({ circleId, done, from = null, to = null, amountCents = null }) {
   const members = membersOfCircle(circleId);
@@ -147,7 +165,7 @@ export async function budget(root) {
   if (!circles.length) { append(root, pageHead('Budget'), emptyState('Aucun cercle disponible.')); return; }
   let circleId;
   let category = ''; // filtre de catégorie de l'historique ('' = toutes)
-  let expenses = []; let recurring = []; let summary = { balances: {}, transfers: [], categories: [], settlements: [] };
+  let expenses = []; let recurring = []; let invoices = []; let summary = { balances: {}, transfers: [], categories: [], settlements: [] };
 
   // Pastilles partagées avec les autres pages : elles se redessinent au clic (la surbrillance suit
   // le cercle choisi) et gardent le même cercle actif d'une page à l'autre.
@@ -160,6 +178,7 @@ export async function budget(root) {
   const resetBtn = h('button', { class: 'btn small', type: 'button', onclick: () => { category = ''; period.reset(); load(); } }, 'Réinitialiser');
   const filterBar = h('div', { class: 'filter-bar' }, period.node, catSelect, resetBtn);
   const balBox = h('div', { class: 'stack' });
+  const pendingBox = h('div', { class: 'stack' });
   const catBox = h('div', { class: 'stack' });
   const trendBox = h('div', { class: 'stack' });
   const recBox = h('div', { class: 'stack' });
@@ -168,16 +187,38 @@ export async function budget(root) {
   append(root, pageHead('Budget', h('div', { class: 'row gap' },
     h('button', { class: 'btn', onclick: () => settlementForm({ circleId, done: load }) }, icon('swap', 16), 'Remboursement'),
     h('button', { class: 'btn primary', onclick: () => expenseForm({ circleId, done: load }) }, icon('plus', 16), 'Dépense'))),
-    chips, filterBar, balBox, catBox, trendBox, recBox, listBox);
+    chips, filterBar, balBox, pendingBox, catBox, trendBox, recBox, listBox);
 
   async function load() {
-    [expenses, recurring, summary] = await Promise.all([get('/expenses'), get('/recurring-expenses'), get(`/expenses/summary?circle_id=${circleId}&${period.query()}`)]);
+    [expenses, recurring, summary, invoices] = await Promise.all([get('/expenses'), get('/recurring-expenses'), get(`/expenses/summary?circle_id=${circleId}&${period.query()}`), get('/invoices')]);
     period.setYears([...new Set(expenses.filter((e) => e.circle_id === circleId).map((e) => e.date.slice(0, 4)))]);
     draw();
   }
-  onRefresh(['expenses', 'recurring-expenses'], load);
+  onRefresh(['expenses', 'recurring-expenses', 'invoices'], load);
 
-  function draw() { drawBalances(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
+  function draw() { drawBalances(); drawPendingInvoices(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
+
+  // Factures périscolaires reçues par addon (Réglages → Modules complémentaires), pas encore payées :
+  // visibles ici pour qu'on les attribue à quelqu'un, mais hors des comptes tant qu'elles ne le sont pas.
+  function drawPendingInvoices() {
+    const rows = invoices.filter((i) => i.circle_id === circleId && !i.expense_id);
+    if (!rows.length) { mount(pendingBox); return; }
+    mount(pendingBox, h('h2', null, 'Factures en attente'),
+      h('ul', { class: 'expense-list' }, rows.map((inv) => {
+        const assignee = inv.assigned_to ? userName(inv.assigned_to) : null;
+        return h('li', { class: 'expense-row' },
+          h('span', { class: 'settle-icon' }, icon('doc', 14)),
+          h('div', { class: 'expense-main' }, h('strong', null, inv.label, ` — ${inv.number}`),
+            h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '', ' · ', assignee ? `à payer par ${assignee}` : 'non attribuée')),
+          h('strong', null, euro(inv.amount_cents)),
+          assignee ? h('button', { class: 'btn small', onclick: () => act(async () => {
+            await put(`/invoices/${inv.id}/assign`, { assigned_to: inv.assigned_to, paid: true, date: today() });
+            toast('Facture marquée payée'); load();
+          }) }, 'Marquer payée') : null,
+          h('button', { class: 'btn small', onclick: () => invoiceAssignForm({ invoice: inv, circleId, done: load }) }, assignee ? 'Changer' : 'Attribuer'),
+          h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer la facture « ${inv.number} » ?`)) act(async () => { await del(`/invoices/${inv.id}`); load(); }); } }, icon('trash', 16)));
+      })));
+  }
 
   // Vue d'ensemble dans le temps : total dépensé sur ce cercle, mois par mois (indépendant des
   // filtres période/catégorie ci-dessus, qui ne portent que sur le détail par catégorie et l'historique).

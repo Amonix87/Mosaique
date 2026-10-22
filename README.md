@@ -262,6 +262,14 @@ Une facture (rattachée à un cercle plutôt qu'à un enfant — une facture de 
 ```
 `circle` (nom du cercle) ou `circle_id` sont facultatifs si vous n'avez qu'un seul cercle dans Mosaïque. `amount` s'exprime en euros (ou `amount_cents` directement en centimes). Comme pour les devoirs, `external_id` évite les doublons en mettant à jour l'entrée existante plutôt que d'en créer une nouvelle — c'est d'ailleurs exactement ce que font les modules eux-mêmes, en interne.
 
+Les factures importées n'apparaissent pas dans École, mais directement dans **Budget**, comme des
+« factures en attente » : elles n'entrent pas encore dans les comptes (qui doit combien à qui), tant
+qu'elles ne sont pas attribuées à quelqu'un. Pour chacune, on choisit qui la règle, soit simplement
+pour l'instant (« va payer » — elle reste en attente, réattribuable), soit en cochant « déjà payée »,
+ce qui crée aussitôt une vraie dépense partagée à égalité entre les membres du cercle et fait sortir
+la facture de la liste d'attente. Supprimer cette dépense depuis Budget (comme n'importe quelle
+dépense) la fait réapparaître en attente, toujours attribuée à la même personne.
+
 Un enfant peut être exclu du suivi de garde s'il n'en a pas besoin (il vit toujours au même endroit) : décochez « Concerné par une garde partagée » dans sa fiche (Famille → Enfants → Modifier). Il disparaît alors de l'onglet Garde — planning, statistiques, vacances scolaires — sans que rien d'autre ne change pour lui (agenda, contacts, budget restent inchangés). Réactivable à tout moment.
 
 Chaque attribution de garde est indépendante par enfant : toucher un jour dans la mosaïque d'un enfant ne présélectionne que lui, jamais les autres — pratique quand chaque enfant suit un rythme différent (garde partagée pour l'un, arrangement différent pour l'autre). Vous pouvez toujours cocher manuellement d'autres enfants dans la barre d'action si vous voulez appliquer la même période à plusieurs d'entre eux à la fois.

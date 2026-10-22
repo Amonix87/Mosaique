@@ -537,4 +537,15 @@ if (!childCols2.includes('blood_type')) {
   db.exec('ALTER TABLE children ADD COLUMN doctor_phone TEXT');
 }
 
+// Les factures périscolaires (reçues par addon) vivent désormais dans Budget plutôt que comme une
+// simple liste passive dans École : elles apparaissent « en attente » jusqu'à ce qu'on les attribue
+// à quelqu'un qui va les payer (assigned_to) ou qu'on les marque payées, ce qui crée une vraie
+// dépense partagée (expense_id) — supprimer cette dépense redonne automatiquement la facture en
+// attente (ON DELETE SET NULL).
+const invoiceCols = db.prepare("PRAGMA table_info(invoices)").all().map((c) => c.name);
+if (!invoiceCols.includes('assigned_to')) {
+  db.exec('ALTER TABLE invoices ADD COLUMN assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL');
+  db.exec('ALTER TABLE invoices ADD COLUMN expense_id INTEGER REFERENCES expenses(id) ON DELETE SET NULL');
+}
+
 module.exports = { db, DATA_DIR, MEDIA_DIR };

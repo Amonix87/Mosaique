@@ -1,22 +1,22 @@
-import { h, icon, state, get, put, del, act, toast, confirmBox, onRefresh, pageHead, emptyState, fmtDayY, ago, euro, childById, mount, append } from './core.js';
+import { h, icon, state, get, put, del, act, toast, confirmBox, onRefresh, pageHead, emptyState, fmtDayY, ago, childById, mount, append } from './core.js';
 
 export async function ecole(root) {
-  let homework = []; let notes = []; let reservations = []; let invoices = [];
+  let homework = []; let notes = []; let reservations = [];
   const hwBox = h('div', { class: 'stack big' });
   const notesBox = h('div', { class: 'stack' });
   const resaBox = h('div', { class: 'stack' });
-  const invBox = h('div', { class: 'stack' });
   append(root, pageHead('École'), hwBox, h('h2', null, "Mots de l'école"), notesBox,
-    h('h2', null, 'Réservations périscolaires'), resaBox, h('h2', null, 'Factures périscolaires'), invBox);
+    h('h2', null, 'Réservations périscolaires'), resaBox,
+    h('p', { class: 'muted' }, 'Les factures périscolaires se retrouvent et se règlent dans ', h('a', { href: '#/budget' }, 'Budget'), ', une fois attribuées à quelqu\'un.'));
 
   async function load() {
-    [homework, notes, reservations, invoices] = await Promise.all([get('/homework'), get('/notes'), get('/reservations'), get('/invoices')]);
+    [homework, notes, reservations] = await Promise.all([get('/homework'), get('/notes'), get('/reservations')]);
     draw();
   }
-  onRefresh(['homework', 'notes', 'reservations', 'invoices'], load);
+  onRefresh(['homework', 'notes', 'reservations'], load);
 
   function draw() {
-    if (!state.children.length) { mount(hwBox, emptyState("Ajoutez d'abord des enfants dans « Famille ».")); mount(notesBox); mount(resaBox); mount(invBox); return; }
+    if (!state.children.length) { mount(hwBox, emptyState("Ajoutez d'abord des enfants dans « Famille ».")); mount(notesBox); mount(resaBox); return; }
     const byChild = {};
     for (const h of homework) (byChild[h.child_id] ||= []).push(h);
     const groups = state.children.filter((c) => byChild[c.id] && byChild[c.id].length);
@@ -53,14 +53,6 @@ export async function ecole(root) {
           h('span', { class: 'muted' }, fmtDayY(r.date), r.status ? ` — ${r.status}` : '')),
         h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer « ${r.title} » ?`)) act(async () => { await del(`/reservations/${r.id}`); load(); }); } }, icon('trash', 16)))))))
       : emptyState("Aucune réservation pour l'instant. Elles apparaîtront ici une fois l'intégration e-portail connectée (voir Réglages)."));
-
-    mount(invBox, invoices.length ? h('ul', { class: 'task-list' }, invoices.map((i) => h('li', { class: 'task-row' },
-      h('div', { class: 'task-main' },
-        h('span', { class: 'task-title' }, i.label, ` — ${i.number}`),
-        h('span', { class: 'muted' }, fmtDayY(i.date), i.due_date ? ` · échéance ${fmtDayY(i.due_date)}` : '', i.status ? ` — ${i.status}` : ''),
-        h('span', { class: 'muted' }, euro(i.amount_cents))),
-      h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer la facture « ${i.number} » ?`)) act(async () => { await del(`/invoices/${i.id}`); load(); }); } }, icon('trash', 16)))))
-      : emptyState("Aucune facture pour l'instant."));
   }
 
   function row(i) {
