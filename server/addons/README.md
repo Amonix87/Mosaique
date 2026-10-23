@@ -25,8 +25,28 @@ module.exports = {
     // { label, number, date, amount, circle, ... }. Une erreur lancée ici est journalisée côté
     // serveur et affichée dans Réglages (dernière erreur) ; elle n'interrompt pas le reste de
     // Mosaïque.
-    return { reservations: [], invoices: [] };
+    //
+    // openSlots (facultatif) : liste de { child, title, date } pour les créneaux ACTUELLEMENT
+    // visibles mais pas encore réservés (ex. isOuvert===true côté e-portail) — permet une détection
+    // réelle du moment où une période (vacances/ALSH) devient réservable : voir extractOpenSlots et
+    // maybeSendHolidayNotices dans server/index.js. N'a de sens que si votre portail distingue, pour
+    // un même créneau, « pas encore visible » (absence totale) de « visible, pas encore réservé ».
+    return { reservations: [], invoices: [], openSlots: [] };
   },
+
+  // syncHistory (facultatif) : import complet de l'historique, bien plus large que ce que sync()
+  // peut remonter (souvent limité à quelques semaines par le portail lui-même). Signature :
+  //   async syncHistory(config, { sinceRef, onProgress, onBatch }) -> { newestRef, reachedEnd }
+  // - sinceRef : jusqu'où le dernier parcours complet est déjà allé (0 au premier parcours) — permet
+  //   de ne reprendre que les nouveautés plutôt que tout refaire à chaque fois.
+  // - onProgress({ processed, total }) : à appeler régulièrement, pour l'avancement affiché dans
+  //   Réglages pendant que ça tourne.
+  // - onBatch(items) : à appeler au fil de l'eau (pas tout à la fin) avec des réservations au même
+  //   format que reservations ci-dessus — appliquées immédiatement, pour ne rien perdre si le
+  //   parcours est interrompu en cours de route.
+  // Un parcours complet peut représenter des centaines de requêtes : toujours réservé au
+  // déclenchement manuel et exécuté en tâche de fond (voir runAddonHistory dans server/index.js),
+  // avec une pause entre chaque requête pour rester correct avec le serveur distant.
 };
 ```
 
@@ -36,7 +56,8 @@ un import manuel — un addon n'a pas besoin de connaître la base de données d
 
 La synchronisation automatique tourne environ une fois par heure pour tout addon activé (voir
 `maybeSyncAddons()` dans `server/index.js`), et peut aussi être déclenchée manuellement depuis
-Réglages (« Synchroniser maintenant »).
+Réglages (« Synchroniser maintenant »), qui lance aussi, en tâche de fond, l'import d'historique
+(`syncHistory`) pour les addons qui le proposent.
 
 Si vous préférez ne pas confier d'identifiants à Mosaïque, ou que votre site n'a pas d'addon dédié,
 vous pouvez toujours envoyer vos propres données normalisées directement aux points d'entrée

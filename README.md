@@ -230,6 +230,15 @@ Activez le module correspondant à votre portail, renseignez son adresse et vos 
 Mosaïque se charge lui-même de la synchronisation (environ une fois par heure, ou tout de suite
 via « Synchroniser maintenant »).
 
+Pour les modules qui le proposent (e-portail notamment), « Synchroniser maintenant » lance aussi, en
+tâche de fond, un import complet de l'**historique** des réservations déjà effectuées (bien plus
+large que la fenêtre habituelle, limitée à quelques semaines par le portail lui-même) — remonte à
+plusieurs années en arrière si le portail les garde. Ce premier passage peut prendre plusieurs
+minutes (une pause entre chaque requête, pour rester correct avec le serveur de votre mairie) ; son
+avancement s'affiche dans Réglages pendant ce temps, et vous pouvez naviguer ailleurs dans Mosaïque
+sans l'interrompre. Les passages suivants ne récupèrent plus que les nouveautés et sont quasi
+instantanés.
+
 Vos identifiants sont alors conservés dans la base de Mosaïque (comme l'est déjà, par exemple, le
 mot de passe du serveur SMTP) — jamais transmis ailleurs qu'au portail concerné. Si vous préférez
 ne pas les lui confier, le point d'entrée manuel ci-dessous reste disponible.
@@ -292,13 +301,13 @@ déjà réservé (cantine, garderie, journée complète...) et, en creux, ce qui
 ne pas découvrir un oubli le lundi matin. Avec une garde partagée, chaque jour part au parent qui a
 l'enfant ce jour-là. Les jours de vacances scolaires sont exclus du récapitulatif.
 
-Comme le portail e-portail n'indique nulle part, de façon fiable, la date d'ouverture des réservations
-pour les prochaines vacances (ALSH), Mosaïque l'estime : une notification prévient quand les
-réservations *devraient* être ouvertes (par défaut 3 semaines avant le début des vacances, réglable),
-puis une seconde arrive une semaine plus tard si rien n'a encore été réservé pour cette période — pour
-ne pas rater la fenêtre si elle a ouvert plus tard que prévu. Ces deux réglages (heure du récapitulatif
-du jeudi, délai d'anticipation des vacances) se trouvent dans Famille → Réglages, et n'apparaissent que
-si l'intégration e-portail est activée.
+Pour les prochaines vacances (ALSH), Mosaïque détecte réellement l'ouverture des réservations plutôt
+que de l'estimer : avant l'ouverture, le portail n'affiche absolument rien pour ces dates (pas même un
+créneau non réservé) ; dès qu'un créneau ALSH apparaît pour une date de vacances surveillée, une
+notification part aussitôt. Cette vérification tourne une fois par jour ; une seconde notification
+arrive une semaine après la première si rien n'a encore été réservé pour cette période, pour ne pas
+rater la fenêtre. L'heure du récapitulatif du jeudi soir se règle dans Famille → Réglages, et n'apparaît
+que si l'intégration e-portail est activée.
 
 Un enfant peut être exclu du suivi de garde s'il n'en a pas besoin (il vit toujours au même endroit) : décochez « Concerné par une garde partagée » dans sa fiche (Famille → Enfants → Modifier). Il disparaît alors de l'onglet Garde — planning, statistiques, vacances scolaires — sans que rien d'autre ne change pour lui (agenda, contacts, budget restent inchangés). Réactivable à tout moment.
 

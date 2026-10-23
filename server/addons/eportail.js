@@ -159,6 +159,22 @@ function normalizeReservation(e) {
   };
 }
 
+// Détection RÉELLE (pas une estimation) du moment où un créneau (vacances/ALSH en particulier)
+// devient réservable : un créneau pas encore ouvert à la réservation n'apparaît PAS DU TOUT dans
+// getEventsList() — il n'y a pas de champ "fermé", juste une absence totale — alors qu'un créneau
+// déjà visible mais pas encore réservé (statut INSCRIPTION_OK) porte isOuvert=true. Vérifié en
+// direct sur un vrai créneau de vacances (Toussaint) : voir server/addons/README.md. On remonte donc
+// tous les créneaux actuellement "ouverts", pour que le serveur se souvienne de ceux déjà aperçus
+// (table seen_open_slots) — la première apparition d'un créneau ALSH pour une date de vacances donnée
+// EST l'ouverture des réservations pour cette période.
+function extractOpenSlots(events) {
+  return events.filter((e) => e.isOuvert === true).map((e) => ({
+    child: String(e.individu || e.individuNom || '').trim(),
+    title: String(e.title || e.libelle || '').trim(),
+    date: String(e.start || '').slice(0, 10),
+  })).filter((s) => s.child && s.title && s.date);
+}
+
 function windowBounds() {
   const now = new Date(); now.setHours(0, 0, 0, 0);
   const min = new Date(now); min.setDate(min.getDate() - DAYS_BEFORE);
@@ -225,6 +241,118 @@ async function fetchInvoices(client, baseUrl, circleId) {
   return items;
 }
 
+/* ───────────────────────── Historique profond des réservations ─────────────────────────
+   La page de planning (fetchReservations ci-dessus) ne remonte que quelques semaines — c'est une
+   limite du portail, pas de Mosaïque (voir server/addons/README.md). « Mes demandes » (menu Mon
+   espace citoyen), elle, garde la trace de CHAQUE demande de réservation jamais faite, avec son
+   statut final — vérifié en direct : remonte à plusieurs années. C'est un parcours volontairement
+   séparé de sync() : une requête par demande acceptée (donc potentiellement des centaines au premier
+   passage), réservé au déclenchement manuel et toujours en tâche de fond (voir runAddonHistory dans
+   server/index.js), avec une pause entre chaque requête pour rester correct avec le serveur de la
+   mairie. sinceRef permet de ne reprendre que ce qui est nouveau depuis le dernier parcours complet
+   (la liste est triée du plus récent au plus ancien : on s'arrête dès qu'on retombe sur une référence
+   déjà couverte). */
+function addDaysISO(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
+}
+
+// « BOURY Léopold » → « Léopold » : le nom de famille est le ou les mots tout en majuscules
+// (accents compris), le reste est le prénom — pas besoin de connaître l'ordre des enfants,
+// Mosaïque ne retient que le prénom (voir child dans normalizeReservation ci-dessus).
+function childGivenNameFromLegend(legend) {
+  const m = /:\s*(.+)$/.exec(legend || '');
+  const full = (m ? m[1] : legend || '').trim();
+  const tokens = full.split(/\s+/).filter(Boolean);
+  const given = tokens.filter((t) => !/^[A-ZÀÂÄÇÉÈÊËÎÏÔŒÙÛÜŸ-]+$/.test(t));
+  return (given.length ? given : tokens).join(' ').trim();
+}
+
+// Page détail d'une demande (/demandeDetail/:ref) : structure stable (champs « Structure »,
+// « Activité », « Date de début », « Date de fin » dans des .form-group, et une frise d'étapes dont
+// la DERNIÈRE (dans l'ordre du DOM, qu'elle soit affichée à gauche ou à droite) donne le statut final
+// — une demande acceptée puis annulée plus tard porterait par exemple une 3e étape). Une demande peut
+// couvrir plusieurs jours d'affilée (ex. une semaine de vacances réservée en une fois) : on crée alors
+// une entrée par jour, comme le ferait une suite de réservations individuelles.
+function parseDemandeDetail(html, ref) {
+  const $ = cheerio.load(html);
+  const legend = $('legend.alpacaBL').first().text().trim();
+  const child = childGivenNameFromLegend(legend);
+  const fields = {};
+  $('.alpaca-container-item .form-group').each((_, el) => {
+    const label = stripAccents($(el).find('.control-label').first().text().trim());
+    const value = $(el).children('div').first().text().trim();
+    if (label) fields[label] = value;
+  });
+  const statutBlocks = $('.containerH h4 i').toArray().map((el) => $(el).text().trim());
+  const lastStatut = statutBlocks.length ? statutBlocks[statutBlocks.length - 1] : '';
+  if (!/accept/i.test(lastStatut)) return []; // refusée/annulée/encore en cours : pas une réservation confirmée
+  const activite = fields['activite'];
+  const dateDebut = parseFrDate(fields['date de debut']);
+  const dateFin = parseFrDate(fields['date de fin']) || dateDebut;
+  if (!child || !activite || !dateDebut) return [];
+  const items = [];
+  for (let d = dateDebut; d <= dateFin; d = addDaysISO(d, 1)) {
+    items.push({
+      child, title: activite, date: d, start_time: null, end_time: null,
+      status: 'RESERVATION_OK', source: 'eportail_demande', external_id: `${ref}-${d}`,
+    });
+  }
+  return items;
+}
+
+async function syncHistory(config, { sinceRef = 0, onProgress, onBatch, sleepMs = 500 } = {}) {
+  const baseUrl = String(config.url || '').trim().replace(/\/+$/, '');
+  if (!baseUrl || !config.username || !config.password) {
+    throw new Error('Adresse du portail, identifiant et mot de passe requis.');
+  }
+  const client = makeClient();
+  await login(client, baseUrl, config.username, config.password);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  let page = 0;
+  let processed = 0;
+  let total = null;
+  let newestRef = 0;
+  let reachedEnd = false;
+  while (true) {
+    const url = `${baseUrl}/demandes?typeDemande=resa&pageNumber=${page}&sortField=d.dateDemande&sortDirection=Desc`;
+    const res = await client.request(url);
+    const $ = cheerio.load(res.body);
+    if (total == null) {
+      const m = /\(([\d\s]+)\s*R[ée]sultats\)/.exec($('body').text());
+      if (m) total = Number(m[1].replace(/\s/g, ''));
+    }
+    const rows = $('table tbody tr').toArray();
+    if (!rows.length) { reachedEnd = true; break; }
+
+    let hitKnown = false;
+    const batch = [];
+    for (const tr of rows) {
+      const href = $(tr).find('a[href*="/demandeDetail/"]').attr('href') || '';
+      const ref = Number((/\/demandeDetail\/(\d+)/.exec(href) || [])[1]);
+      if (!ref) continue;
+      if (ref <= sinceRef) { hitKnown = true; break; }
+      if (!newestRef) newestRef = ref; // la 1re ligne rencontrée est forcément la plus récente (tri desc)
+      processed++;
+      const statut = $(tr).find('td[data-name="Statut"]').text().trim();
+      if (/accept/i.test(statut)) {
+        await sleep(sleepMs);
+        const detail = await client.request(`${baseUrl}/demandeDetail/${ref}`);
+        batch.push(...parseDemandeDetail(detail.body, ref));
+      }
+      if (onProgress) onProgress({ processed, total });
+    }
+    if (batch.length && onBatch) onBatch(batch);
+    if (hitKnown) break;
+    page++;
+    await sleep(sleepMs);
+  }
+  return { newestRef, totalApprox: total, processed, reachedEnd };
+}
+
 module.exports = {
   id: 'eportail',
   label: 'e-portail (Berger-Levrault) — garderie, cantine, ALSH',
@@ -241,13 +369,21 @@ module.exports = {
     }
     const client = makeClient();
     await login(client, baseUrl, config.username, config.password);
-    const reservations = (await fetchReservations(client, baseUrl)).filter(isReserved).map(normalizeReservation)
+    const rawEvents = await fetchReservations(client, baseUrl);
+    const reservations = rawEvents.filter(isReserved).map(normalizeReservation)
       .filter((r) => r.child && r.date && withinWindow(r.date));
+    const openSlots = extractOpenSlots(rawEvents);
     const invoices = (await fetchInvoices(client, baseUrl, config.circle)).filter((i) => i.date && i.number && i.amount != null);
     // Fenêtre couverte par cette synchronisation : permet au serveur de supprimer les réservations
     // devenues obsolètes (annulées depuis, ou — avant la correction du filtre ci-dessus —
     // importées par erreur alors qu'elles n'étaient en fait pas réservées).
     const { from, to } = windowBounds();
-    return { reservations, invoices, reservationsWindow: { source: 'eportail', from, to } };
+    return { reservations, invoices, openSlots, reservationsWindow: { source: 'eportail', from, to } };
   },
+  syncHistory,
+  // Exports supplémentaires réservés aux tests (voir test/smoke.js, même convention que _parseRows
+  // dans server/holidays.js) : permettent de vérifier l'analyse du HTML sans dépendre du réseau.
+  _parseDemandeDetail: parseDemandeDetail,
+  _childGivenNameFromLegend: childGivenNameFromLegend,
+  _extractOpenSlots: extractOpenSlots,
 };

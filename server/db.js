@@ -596,6 +596,25 @@ if (invoiceCols2.find((c) => c.name === 'circle_id')?.notnull) {
     CREATE INDEX IF NOT EXISTS idx_invoices_circle_date ON invoices(circle_id, date);
   `);
 }
+// Créneaux « ouverts » (visibles sur le planning, réservés ou pas) déjà aperçus au moins une fois,
+// par enfant — permet de détecter RÉELLEMENT le moment où les vacances deviennent réservables : avant
+// ouverture, le portail n'affiche RIEN pour ces dates (ni créneau réservé, ni "non réservé" — voir
+// server/addons/README.md), donc la première apparition d'un créneau ALSH pour une date donnée EST
+// l'ouverture des réservations. Une fois vu, un créneau reste dans cette table même après avoir été
+// réservé (son isOuvert redevient null et il disparaît alors du lot remonté par l'addon) : c'est
+// voulu, point ci-dessous dans maybeSendHolidayNotices (server/index.js) n'a besoin que de savoir si
+// la période a été vue ouverte un jour, pas si elle l'est encore maintenant.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS seen_open_slots (
+    id INTEGER PRIMARY KEY,
+    child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_seen_open_slots ON seen_open_slots(child_id, title, date);
+`);
+
 // Correction du correctif ci-dessus : l'identifiant d'une facture est unique par (source,
 // external_id) TOUT COURT, jamais par cercle — circle_id est une attribution de notre côté, pas une
 // donnée du portail, et une fois corrigée à la main (PUT /invoices/:id/attribute), une synchronisation

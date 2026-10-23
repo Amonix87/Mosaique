@@ -244,7 +244,6 @@ function meState(u) {
       recipes_enabled: getSetting('recipes_enabled', 'false') === 'true',
       recap_hour: Number(getSetting('recap_hour', '18')),
       reservation_recap_hour: Number(getSetting('reservation_recap_hour', '19')),
-      holiday_notice_weeks: Number(getSetting('holiday_notice_weeks', '3')),
       smtp_configured: mailer.configured(),
       public_url: mailer.publicUrl(),
       vapid_public_key: push.publicKey,
@@ -465,7 +464,7 @@ api.post('/me/ical-token', (req, res) => {
 
 /* ── Administration : réglages, membres, cercles, enfants ── */
 api.put('/settings', requireAdmin, (req, res) => {
-  const { family_name, fil_familial, messages_enabled, courses_enabled, pronote_enabled, recap_hour, recipes_enabled, reservation_recap_hour, holiday_notice_weeks } = req.body || {};
+  const { family_name, fil_familial, messages_enabled, courses_enabled, pronote_enabled, recap_hour, recipes_enabled, reservation_recap_hour } = req.body || {};
   if (family_name !== undefined) setSetting('family_name', String(family_name).trim().slice(0, 80) || 'Ma famille');
   if (fil_familial !== undefined) setSetting('fil_familial', fil_familial ? 'true' : 'false');
   if (messages_enabled !== undefined) setSetting('messages_enabled', messages_enabled ? 'true' : 'false');
@@ -482,14 +481,6 @@ api.put('/settings', requireAdmin, (req, res) => {
     const h = Number(reservation_recap_hour);
     if (!Number.isInteger(h) || h < 0 || h > 23) throw bad('Heure invalide.');
     setSetting('reservation_recap_hour', String(h));
-  }
-  // Notification « vacances réservables » : combien de semaines avant le début des prochaines
-  // vacances on estime que les réservations ouvrent (le portail ne permet pas de le savoir avec
-  // certitude sans tenter une vraie réservation — voir server/addons/README.md).
-  if (holiday_notice_weeks !== undefined) {
-    const w = Number(holiday_notice_weeks);
-    if (!Number.isInteger(w) || w < 1 || w > 12) throw bad('Nombre de semaines invalide.');
-    setSetting('holiday_notice_weeks', String(w));
   }
   res.json({ ok: true });
 });
@@ -1466,8 +1457,12 @@ api.put('/addons/:id', requireAdmin, (req, res) => {
   catch (e) { throw new HttpError(e.status || 400, e.message); }
 });
 api.post('/addons/:id/sync', requireAdmin, async (req, res, next) => {
-  try { res.json({ ok: true, ...(await runAddonSync(req.params.id)) }); }
-  catch (e) { addonManager.recordSyncError(req.params.id, e.message); next(e instanceof HttpError ? e : new HttpError(502, e.message)); }
+  try {
+    const result = await runAddonSync(req.params.id);
+    // Lancée en tâche de fond (jamais attendue ici) : voir runAddonHistory ci-dessus.
+    runAddonHistory(req.params.id);
+    res.json({ ok: true, ...result });
+  } catch (e) { addonManager.recordSyncError(req.params.id, e.message); next(e instanceof HttpError ? e : new HttpError(502, e.message)); }
 });
 
 /* Dépenses partagées */
@@ -2362,11 +2357,19 @@ function checkImportToken(req, res) {
 // Applique le résultat d'un addon (server/addons/*.js) exactement comme un import manuel : même
 // résolution enfant/cercle, même upsert par external_id. Un addon n'a donc pas besoin de connaître
 // la base de données de Mosaïque, seulement de retourner des éléments au même format.
-function applyAddonResult({ reservations = [], invoices = [], reservationsWindow } = {}) {
+function applyAddonResult({ reservations = [], invoices = [], reservationsWindow, openSlots = [] } = {}) {
   const r = reservations.map((item) => {
     const child = resolveImportChild(item);
     return child ? upsertReservation(child.id, item) : { ok: false, error: 'Enfant introuvable.' };
   });
+  // Créneaux actuellement « ouverts » (voir extractOpenSlots dans eportail.js) : on garde juste la
+  // trace qu'on les a vus un jour (INSERT OR IGNORE sur la contrainte unique), pour détecter la toute
+  // première apparition d'un créneau de vacances — voir maybeSendHolidayNotices ci-dessous.
+  for (const slot of openSlots) {
+    const child = matchChildByName(slot.child);
+    if (!child) continue;
+    db.prepare('INSERT OR IGNORE INTO seen_open_slots(child_id, title, date) VALUES (?,?,?)').run(child.id, slot.title, slot.date);
+  }
   // Un addon qui déclare la fenêtre de dates qu'il vient de couvrir (reservationsWindow) nous
   // permet de supprimer ce qui n'y figure plus — annulé depuis la dernière synchronisation, ou (cas
   // qui a motivé cet ajout) importé par erreur par une version antérieure de l'addon. Sans cette
@@ -2395,6 +2398,43 @@ async function runAddonSync(id) {
   const applied = applyAddonResult(raw);
   addonManager.recordSyncOk(id);
   return applied;
+}
+
+// Import complet (historique) des réservations, pour les addons qui le proposent (syncHistory,
+// facultatif — voir eportail.js) : un parcours potentiellement long (une requête par demande
+// acceptée, avec pause entre chaque), donc TOUJOURS en tâche de fond — jamais attendu par la requête
+// HTTP qui l'a déclenché (voir POST /addons/:id/sync), pour laisser l'administrateur naviguer
+// pendant ce temps (l'avancement, lui, est visible dans Réglages via GET /addons → history).
+// historyJobsRunning (en mémoire) évite seulement de lancer deux parcours en parallèle pour le même
+// addon ; l'état affiché est toujours en base (addonManager.historyState), donc il survit à un
+// redémarrage — un parcours interrompu par un redémarrage reprendra simplement depuis coveredRef.
+const historyJobsRunning = new Set();
+async function runAddonHistory(id) {
+  if (historyJobsRunning.has(id)) return;
+  const addon = addonManager.find(id);
+  if (!addon || typeof addon.syncHistory !== 'function' || !addonManager.isEnabled(id)) return;
+  historyJobsRunning.add(id);
+  const prev = addonManager.historyState(id);
+  addonManager.saveHistoryState(id, { running: true, error: null, started_at: new Date().toISOString(), processed: 0 });
+  try {
+    const result = await addon.syncHistory(addonManager.configOf(id), {
+      sinceRef: prev.coveredRef || 0,
+      onProgress: ({ processed, total }) => addonManager.saveHistoryState(id, { processed, total }),
+      // Appliqué page par page (pas tout à la fin) : si le parcours est interrompu, ce qui a déjà
+      // été traité reste acquis plutôt que perdu.
+      onBatch: (items) => applyAddonResult({ reservations: items }),
+    });
+    addonManager.saveHistoryState(id, {
+      running: false, finished_at: new Date().toISOString(),
+      coveredRef: Math.max(prev.coveredRef || 0, result.newestRef || 0),
+      total: result.totalApprox ?? prev.total,
+    });
+  } catch (e) {
+    addonManager.saveHistoryState(id, { running: false, error: String(e.message || e), finished_at: new Date().toISOString() });
+    console.error(`Historique addon ${id} :`, e.message);
+  } finally {
+    historyJobsRunning.delete(id);
+  }
 }
 // Synchronisation automatique, environ une fois par heure, de tout addon activé (voir tick()).
 // Les erreurs (site indisponible, identifiants invalides…) sont journalisées et affichées dans
@@ -2652,44 +2692,52 @@ function maybeSendReservationRecap() {
   setSetting('last_resa_recap_date', todayStr);
 }
 
-// Notification « vacances réservables » : le portail n'expose aucun signal fiable d'ouverture des
-// réservations (voir server/addons/README.md — vérifié en direct sur un vrai portail), donc on
-// estime la date d'ouverture à N semaines avant le début des prochaines vacances (réglable, Réglages
-// → Administration). Première notification à cette date estimée, puis un rappel une semaine après,
-// seulement si rien n'est encore réservé pour cette période (pour ne pas relancer pour rien).
+// Notification « vacances réservables » : détection RÉELLE (plus une estimation calendaire) — voir
+// extractOpenSlots dans eportail.js et la table seen_open_slots. Avant que le portail n'ouvre une
+// période, aucun créneau ALSH n'apparaît pour ces dates (pas même « non réservé ») ; la toute première
+// fois qu'on en voit un, c'est que les réservations viennent de s'ouvrir. Vérifié une fois par jour
+// (pas la peine plus souvent : la synchronisation des addons qui alimente seen_open_slots tourne de
+// son côté, voir maybeSyncAddons). Un rappel est renvoyé une semaine après la détection si rien n'est
+// encore réservé, pour ne pas relancer pour rien.
 function maybeSendHolidayNotices() {
-  const weeks = Number(getSetting('holiday_notice_weeks', '3'));
   const todayStr = nowLocal().slice(0, 10);
+  if (getSetting('last_holiday_check_date', '') === todayStr) return;
   for (const child of trackedReservationChildren()) {
     const next = loadHolidays().filter((p) => p.zones.includes(child.zone) && p.name !== 'Été' && p.start > todayStr)
       .sort((a, b) => a.start.localeCompare(b.start))[0];
     if (!next) continue;
     const periodKey = `${next.name}-${next.start}`;
-    const openDate = addDays(next.start, -7 * weeks);
-    const reminderDate = addDays(openDate, 7);
-    const sent = (stage) => !!db.prepare('SELECT 1 FROM holiday_notices WHERE child_id=? AND period_key=? AND stage=?').get(child.id, periodKey, stage);
+    const sent = (stage) => db.prepare('SELECT * FROM holiday_notices WHERE child_id=? AND period_key=? AND stage=?').get(child.id, periodKey, stage);
     const markSent = (stage) => db.prepare('INSERT OR IGNORE INTO holiday_notices(child_id,period_key,stage) VALUES(?,?,?)').run(child.id, periodKey, stage);
     const when = `du ${frDate(next.start)} au ${frDate(addDays(next.end, -1))}`;
-    if (todayStr >= openDate && !sent('opened')) {
-      notify(childNotifyTargets(child.id), {
-        kind: 'reservation', title: `Vacances de ${next.name} : pensez à réserver`,
-        body: `Les réservations pour les vacances de ${next.name} (${when}) sont probablement ouvertes — pensez à réserver cantine/garderie/ALSH pour ${child.name} si besoin.`,
-        link: '#/ecole',
-      });
-      markSent('opened');
-    }
-    if (todayStr >= reminderDate && !sent('reminded')) {
-      const already = db.prepare('SELECT 1 FROM school_reservations WHERE child_id=? AND date>=? AND date<?').get(child.id, next.start, next.end);
-      if (!already) {
+    const detected = sent('detected');
+    if (!detected) {
+      const openSlots = db.prepare('SELECT title FROM seen_open_slots WHERE child_id=? AND date>=? AND date<?').all(child.id, next.start, next.end);
+      const opened = openSlots.some((r) => /alsh|loisirs|journee|journée/i.test(r.title));
+      if (opened) {
         notify(childNotifyTargets(child.id), {
-          kind: 'reservation', title: `Vacances de ${next.name} : rien n'est encore réservé`,
-          body: `Pour ${child.name}, rien n'est encore réservé pour les vacances de ${next.name} (${when}). Pensez-y si besoin.`,
+          kind: 'reservation', title: `Vacances de ${next.name} : réservations ouvertes`,
+          body: `Les réservations pour les vacances de ${next.name} (${when}) viennent de s'ouvrir sur le portail — pensez à réserver cantine/garderie/ALSH pour ${child.name} si besoin.`,
           link: '#/ecole',
         });
+        markSent('detected');
       }
-      markSent('reminded'); // qu'on ait relancé ou non : pas de 3e tentative pour cette période
+    } else if (!sent('reminded')) {
+      const reminderDate = addDays(detected.sent_at.slice(0, 10), 7);
+      if (todayStr >= reminderDate) {
+        const already = db.prepare('SELECT 1 FROM school_reservations WHERE child_id=? AND date>=? AND date<?').get(child.id, next.start, next.end);
+        if (!already) {
+          notify(childNotifyTargets(child.id), {
+            kind: 'reservation', title: `Vacances de ${next.name} : rien n'est encore réservé`,
+            body: `Pour ${child.name}, rien n'est encore réservé pour les vacances de ${next.name} (${when}). Pensez-y si besoin.`,
+            link: '#/ecole',
+          });
+        }
+        markSent('reminded'); // qu'on ait relancé ou non : pas de 3e tentative pour cette période
+      }
     }
   }
+  setSetting('last_holiday_check_date', todayStr);
 }
 
 if (require.main === module) {

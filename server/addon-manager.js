@@ -47,12 +47,15 @@ function publicConfig(addon, cfg) {
 function status(id) {
   const addon = find(id);
   if (!addon) return null;
+  const supportsHistory = typeof addon.syncHistory === 'function';
   return {
     id: addon.id, label: addon.label, fields: addon.fields,
     enabled: isEnabled(id),
     config: publicConfig(addon, configOf(id)),
     last_sync_at: getSetting(`addon_${id}_last_sync_at`),
     last_error: getSetting(`addon_${id}_last_error`),
+    supportsHistory,
+    history: supportsHistory ? historyState(id) : null,
   };
 }
 function list() { return REGISTRY.map((a) => status(a.id)); }
@@ -77,4 +80,18 @@ function saveConfig(id, { enabled, config } = {}) {
 function recordSyncOk(id) { setSetting(`addon_${id}_last_sync_at`, new Date().toISOString()); setSetting(`addon_${id}_last_error`, null); }
 function recordSyncError(id, message) { setSetting(`addon_${id}_last_error`, String(message || 'Erreur inconnue').slice(0, 500)); }
 
-module.exports = { list, find, status, configOf, isEnabled, saveConfig, recordSyncOk, recordSyncError };
+// Import complet de l'historique des réservations (addon.syncHistory, facultatif — voir eportail.js) :
+// un parcours long (une requête par demande acceptée), donc toujours en tâche de fond, jamais dans la
+// requête HTTP qui l'a déclenché (voir runAddonHistory dans server/index.js). coveredRef permet de
+// reprendre là où le dernier parcours complet s'est arrêté plutôt que tout refaire à chaque fois.
+function historyState(id) {
+  const raw = getSetting(`addon_${id}_history`);
+  return raw ? JSON.parse(raw) : { running: false, processed: 0, total: null, coveredRef: 0, error: null, started_at: null, finished_at: null };
+}
+function saveHistoryState(id, patch) {
+  const state = { ...historyState(id), ...patch };
+  setSetting(`addon_${id}_history`, JSON.stringify(state));
+  return state;
+}
+
+module.exports = { list, find, status, configOf, isEnabled, saveConfig, recordSyncOk, recordSyncError, historyState, saveHistoryState };

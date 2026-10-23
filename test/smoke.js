@@ -170,6 +170,59 @@ function testHolidaysParsing() {
   console.log('✔ Analyse du calendrier scolaire (API education.gouv.fr) vérifiée');
 }
 
+// Vérifie l'analyse des pages « Mes demandes » / « demandeDetail » de l'addon e-portail (import
+// d'historique) et la détection des créneaux ouverts, sans dépendre du vrai portail — échantillons
+// fidèles à la structure HTML observée en direct (voir server/addons/eportail.js).
+function testEportailHistoryParsing() {
+  const { _parseDemandeDetail, _childGivenNameFromLegend, _extractOpenSlots } = require('../server/addons/eportail.js');
+
+  assert.strictEqual(_childGivenNameFromLegend('Détail de ma demande : BOURY Léopold'), 'Léopold', 'ne garde que le prénom (le nom de famille est tout en majuscules)');
+  assert.strictEqual(_childGivenNameFromLegend('Détail de ma demande : DE LA TOUR Jean-Pierre'), 'Jean-Pierre', 'nom de famille composé');
+
+  const detailHtml = (statutFinal, dateDebut, dateFin) => `
+    <div class="alpaca-field-object panel">
+      <fieldset>
+        <legend tabindex="0" class="alpacaBL">Détail de ma demande : BOURY Léopold</legend>
+        <div>
+          <div class="alpaca-container-item"><div class="form-group"><label class="control-label">Structure</label><div>LES RABOLIOTS</div></div></div>
+          <div class="alpaca-container-item"><div class="form-group"><label class="control-label">Activité</label><div>MERCREDI MATIN</div></div></div>
+          <div class="alpaca-container-item"><div class="form-group"><label class="control-label">Date de début</label><div>${dateDebut}</div></div></div>
+          <div class="alpaca-container-item"><div class="form-group"><label class="control-label">Date de fin</label><div>${dateFin}</div></div></div>
+        </div>
+      </fieldset>
+      <div class="bodyH"><div class="timelineH">
+        <div class="containerH leftH"><div class="contentLeftH"><h3>22 oct. 2026, 22:22:31</h3><p>Création de demande</p><h4><i>Statut\n: En cours d'instruction</i></h4></div></div>
+        <div class="containerH rightH"><div class="contentRightH"><h3>22 oct. 2026, 22:22:32</h3><h4><i>Statut\n: ${statutFinal}</i></h4></div></div>
+      </div></div>
+    </div>`;
+
+  const accepted = _parseDemandeDetail(detailHtml('Accepté', '25/11/2026', '25/11/2026'), 742901415);
+  assert.strictEqual(accepted.length, 1, 'une demande acceptée sur un seul jour → une réservation');
+  assert.deepStrictEqual(accepted[0], {
+    child: 'Léopold', title: 'MERCREDI MATIN', date: '2026-11-25', start_time: null, end_time: null,
+    status: 'RESERVATION_OK', source: 'eportail_demande', external_id: '742901415-2026-11-25',
+  });
+
+  const refused = _parseDemandeDetail(detailHtml('Refusé', '02/10/2026', '02/10/2026'), 741052917);
+  assert.deepStrictEqual(refused, [], 'une demande refusée ne doit jamais remonter comme réservation');
+
+  const multiDay = _parseDemandeDetail(detailHtml('Accepté', '20/12/2026', '24/12/2026'), 700000001);
+  assert.strictEqual(multiDay.length, 5, 'une demande acceptée sur plusieurs jours → une entrée par jour');
+  assert.deepStrictEqual(multiDay.map((r) => r.date), ['2026-12-20', '2026-12-21', '2026-12-22', '2026-12-23', '2026-12-24']);
+  assert.ok(multiDay.every((r) => r.external_id.startsWith('700000001-')), "chaque jour garde un identifiant distinct (pas de doublon possible)");
+
+  // Détection des créneaux ouverts (vacances réservables) : seuls isOuvert===true comptent, et les
+  // entrées sans enfant/titre/date exploitables sont écartées plutôt que de polluer seen_open_slots.
+  const openSlots = _extractOpenSlots([
+    { individu: 'Léopold', title: 'JOURNEE ALSH - 8h', start: '2026-10-30T07:30:00+01:00', isOuvert: true },
+    { individu: 'Léopold', title: 'REPAS', start: '2026-11-13T12:00:00+01:00', isOuvert: null }, // déjà réservé : pas "ouvert"
+    { individu: '', title: 'GARDERIE SOIR', start: '2026-10-30T16:30:00+01:00', isOuvert: true }, // sans enfant : écarté
+  ]);
+  assert.deepStrictEqual(openSlots, [{ child: 'Léopold', title: 'JOURNEE ALSH - 8h', date: '2026-10-30' }]);
+
+  console.log("✔ Analyse de l'historique des réservations e-portail (demandes/détail, créneaux ouverts) vérifiée");
+}
+
 async function main() {
   const smtpPort = await new Promise((resolve) => fakeSmtp.listen(0, '127.0.0.1', () => resolve(fakeSmtp.server.address().port)));
   const nominatimPort = await new Promise((resolve) => fakeNominatim.listen(0, '127.0.0.1', () => resolve(fakeNominatim.address().port)));
@@ -499,13 +552,11 @@ async function main() {
     ok(await bob.post('/api/invites', { name: 'Eve' }), 403);
     ok(await bob.put('/api/settings', { family_name: 'Hack' }), 403);
     ok(await alice.put('/api/settings', { family_name: 'Les Test 2' }));
-    // Rappel du jeudi soir et notification « vacances réservables » (Budget/École) : réglages admin.
+    // Rappel du jeudi soir (Budget/École) : réglage admin.
     ok(await alice.put('/api/settings', { reservation_recap_hour: 24 }), 400, 'heure invalide (0-23)');
-    ok(await alice.put('/api/settings', { holiday_notice_weeks: 0 }), 400, 'au moins 1 semaine');
-    ok(await alice.put('/api/settings', { reservation_recap_hour: 20, holiday_notice_weeks: 2 }));
+    ok(await alice.put('/api/settings', { reservation_recap_hour: 20 }));
     const tunedMe = (await alice.get('/api/me')).body;
     assert.strictEqual(tunedMe.settings.reservation_recap_hour, 20);
-    assert.strictEqual(tunedMe.settings.holiday_notice_weeks, 2);
     ok(await alice.put(`/api/users/${C}/password`, { password: 'nouveaumdp1' }));
     ok(await carla.get('/api/me'), 401, 'sessions révoquées après changement du mot de passe');
     ok(await carla.post('/api/login', { email: 'carla@ex.fr', password: 'nouveaumdp1' }));
@@ -1156,6 +1207,10 @@ async function main() {
     assert.ok(eportail, "l'addon e-portail est bien découvert");
     assert.strictEqual(eportail.enabled, false, 'désactivé par défaut');
     assert.strictEqual(eportail.config.password, false, "aucun mot de passe enregistré au départ");
+    // Import d'historique (syncHistory, facultatif — voir server/addons/README.md) : l'addon
+    // e-portail le propose, et son avancement (toujours en tâche de fond) est exposé ici.
+    assert.strictEqual(eportail.supportsHistory, true, "l'addon e-portail propose l'import d'historique");
+    assert.deepStrictEqual(eportail.history, { running: false, processed: 0, total: null, coveredRef: 0, error: null, started_at: null, finished_at: null }, 'pas encore de parcours effectué');
     ok(await bob.put('/api/addons/eportail', { enabled: true }), 403, "un non-admin ne peut pas configurer un addon");
     ok(await alice.put('/api/addons/inconnu', { enabled: true }), 404, 'addon inconnu');
     // Sans activation préalable, une tentative de synchronisation est refusée avant tout appel réseau.
@@ -1175,6 +1230,7 @@ async function main() {
     assert.ok(syncFail.status >= 400, "un portail injoignable remonte une erreur, jamais un faux succès");
     const afterFail = (await alice.get('/api/addons')).body.find((a) => a.id === 'eportail');
     assert.ok(afterFail.last_error, "l'échec est journalisé et visible dans Réglages");
+    assert.strictEqual(afterFail.history.running, false, "la synchronisation régulière a échoué avant le login : l'import d'historique n'a jamais démarré");
 
     // Notifications push (Web Push) : abonnement, envoi réel (chiffré) vers un faux service local,
     // désabonnement, et nettoyage automatique d'un abonnement expiré (410).
@@ -1241,5 +1297,6 @@ async function main() {
   }
 }
 testHolidaysParsing();
+testEportailHistoryParsing();
 testInstallDetection();
 testDateUtils().then(main).catch((e) => { console.error('\n✘', e.message); process.exit(1); });

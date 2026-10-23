@@ -6,10 +6,14 @@ let pushStatus; // 'unsupported' | 'denied' | 'unsubscribed' | 'subscribed' | un
 let smtpConfig; // chargé à la demande (admin uniquement), undefined = pas encore demandé
 let publicUrlInfo; // idem, pour l'adresse publique (PUBLIC_URL)
 let addonsList; // idem, pour les addons de réservation périscolaire
+let historyPollTimer; // suivi d'avancement d'un import d'historique en cours (voir ensureHistoryPolling)
 
 export async function reglages(root) {
   const box = h('div', { class: 'stack big' });
   append(root, pageHead('Réglages'), box);
+  // Ne cumule pas les minuteurs si on revient plusieurs fois sur cette page (pas de mécanisme de
+  // démontage dans ce routeur — voir ensureHistoryPolling) ; relancé plus bas si un import tourne déjà.
+  clearInterval(historyPollTimer);
 
   function pushSection() {
     const body = (() => {
@@ -111,15 +115,48 @@ export async function reglages(root) {
             } finally {
               // Même en cas d'échec : la dernière erreur, elle, reste affichée tant qu'on ne
               // resynchronise pas avec succès (contrairement au toast, qu'on peut manquer).
-              addonsList = await get('/addons'); draw();
+              // L'import d'historique, lui, vient de démarrer en tâche de fond côté serveur (voir
+              // runAddonHistory) : on relance le suivi d'avancement pour l'afficher ci-dessous.
+              addonsList = await get('/addons'); draw(); ensureHistoryPolling();
             }
           }) }, 'Synchroniser maintenant') : null)),
       a.last_sync_at ? h('p', { class: 'hint' }, `Dernière synchronisation : ${new Date(a.last_sync_at).toLocaleString('fr-FR')}`) : null,
-      a.last_error ? h('p', { class: 'form-error' }, `Dernière erreur : ${a.last_error}`) : null);
+      a.last_error ? h('p', { class: 'form-error' }, `Dernière erreur : ${a.last_error}`) : null,
+      historyHint(a));
+  }
+
+  // Avancement de l'import d'historique (voir runAddonHistory côté serveur) : « Synchroniser
+  // maintenant » le lance en tâche de fond, sans bloquer la page — on affiche juste où ça en est,
+  // avec une barre de progression tant qu'il tourne (voir ensureHistoryPolling ci-dessous).
+  function historyHint(a) {
+    const hist = a.history;
+    if (!hist) return null;
+    if (hist.running) {
+      const pct = hist.total ? Math.min(100, Math.round((100 * hist.processed) / hist.total)) : null;
+      return h('div', { class: 'stack', style: { gap: '.3rem' } },
+        h('p', { class: 'hint' }, `Récupération de l'historique des réservations en cours… ${hist.processed || 0}${hist.total ? ` / ${hist.total}` : ''} — vous pouvez naviguer ailleurs dans Mosaïque pendant ce temps.`),
+        h('div', { class: 'progress-bar' }, h('div', { class: 'progress-bar-fill', style: { width: `${pct ?? 15}%` } })));
+    }
+    if (hist.error) return h('p', { class: 'form-error' }, `Historique des réservations : ${hist.error}`);
+    if (hist.finished_at) return h('p', { class: 'hint' }, `Historique des réservations à jour (dernière vérification : ${new Date(hist.finished_at).toLocaleString('fr-FR')}).`);
+    return null;
+  }
+
+  // Tant qu'un import d'historique tourne pour au moins un addon, on reactualise la liste toutes les
+  // quelques secondes pour suivre son avancement — s'arrête seul une fois terminé, et est relancé à
+  // chaque entrée sur cette page (voir le clearInterval en tête de reglages()) pour ne jamais cumuler
+  // plusieurs minuteurs si on revient plusieurs fois sur Réglages.
+  function ensureHistoryPolling() {
+    clearInterval(historyPollTimer);
+    if (!Array.isArray(addonsList) || !addonsList.some((a) => a.history && a.history.running)) return;
+    historyPollTimer = setInterval(async () => {
+      addonsList = await get('/addons'); draw();
+      if (!addonsList.some((a) => a.history && a.history.running)) clearInterval(historyPollTimer);
+    }, 3000);
   }
 
   function addonsSection() {
-    if (addonsList === undefined) { addonsList = 'loading'; get('/addons').then((r) => { addonsList = r; draw(); }); }
+    if (addonsList === undefined) { addonsList = 'loading'; get('/addons').then((r) => { addonsList = r; draw(); ensureHistoryPolling(); }); }
     if (addonsList === 'loading') return h('section', { class: 'card' }, h('h2', null, 'Modules complémentaires'), h('p', { class: 'muted' }, 'Chargement…'));
     if (!addonsList.length) return null;
     return h('section', { class: 'card' }, h('h2', null, 'Modules complémentaires (réservations et factures périscolaires)'),
@@ -179,7 +216,6 @@ export async function reglages(root) {
           recipes_enabled: e.target.elements.recipes_enabled.checked,
           ...(state.settings.pronote_enabled ? {
             reservation_recap_hour: e.target.elements.reservation_recap_hour.value,
-            holiday_notice_weeks: e.target.elements.holiday_notice_weeks.value,
           } : {}),
         });
         toast('Réglages enregistrés'); refresh();
@@ -192,9 +228,6 @@ export async function reglages(root) {
       h('label', { class: 'check-field' }, h('input', { type: 'checkbox', name: 'recipes_enabled', checked: state.settings.recipes_enabled }), h('span', null, 'Activer les recettes de cuisine')),
       h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Heure du récapitulatif quotidien par e-mail'), h('select', { name: 'recap_hour' }, Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: i === state.settings.recap_hour }, `${String(i).padStart(2, '0')}h`)))),
       state.settings.pronote_enabled ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Heure du rappel du jeudi soir (réservations périscolaires de la semaine suivante)'), h('select', { name: 'reservation_recap_hour' }, Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: i === state.settings.reservation_recap_hour }, `${String(i).padStart(2, '0')}h`)))) : null,
-      state.settings.pronote_enabled ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Vacances réservables : notifier combien de semaines avant leur début'),
-        h('input', { type: 'number', name: 'holiday_notice_weeks', min: 1, max: 12, value: state.settings.holiday_notice_weeks }),
-        h('span', { class: 'hint' }, "Estimation seulement : le portail de réservation ne permet pas de savoir avec certitude quand les réservations ouvrent. Un rappel supplémentaire est envoyé une semaine plus tard si rien n'est encore réservé.")) : null,
       h('div', { class: 'row end' }, h('button', { class: 'btn primary', type: 'submit' }, 'Enregistrer')))));
 
       sections.push(h('section', { class: 'card' }, h('h2', null, 'Sauvegarde'),
