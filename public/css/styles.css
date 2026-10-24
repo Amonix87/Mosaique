@@ -254,6 +254,17 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .tile.sel { outline: 2px solid var(--ring); outline-offset: 1px; }
 .tile.today { box-shadow: inset 0 0 0 2px var(--ink); }
 .tile.hol::after { content: ''; }
+/* Jour de transition : la case jour garde sa taille normale, et une petite épingle en surimpression
+   ouvre le réglage du lieu/heure au cas par cas (voir handoverForm dans garde.js). Un bouton ne peut
+   pas être imbriqué dans un autre bouton : on enveloppe donc la case dans ce conteneur. */
+.tile-cell { position: relative; aspect-ratio: 1; }
+.tile-cell .tile { width: 100%; height: 100%; aspect-ratio: auto; }
+.tile-pin {
+  position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; border: 1px solid var(--line);
+  background: var(--card); color: var(--ink-soft); cursor: pointer; padding: 0;
+}
+.tile-pin.set { background: var(--accent); color: #fff; border-color: transparent; }
 .legend { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; font-size: .82rem; margin-top: .4rem; }
 .legend-item { display: flex; align-items: center; gap: .35rem; }
 .swatch { width: 12px; height: 12px; border-radius: 4px; display: inline-block; }

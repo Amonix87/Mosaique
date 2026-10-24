@@ -381,6 +381,21 @@ async function main() {
     assert.ok(detail.years['2026'], "l'année 2026 apparaît, puisqu'elle contient des nuits enregistrées");
     assert.ok(!detail.years['2019'], "une année sans aucune nuit n'apparaît pas");
 
+    // Transition au cas par cas (lieu/heure ponctuels, distincts du lieu/heure habituel de l'enfant —
+    // voir handover_location/handover_time sur l'enfant lui-même, testés ailleurs).
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-11-03', location: 'Chez mamie', time: '18:00' }), 200, 'transition ponctuelle enregistrée');
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-11-03', location: 'Chez mamie', time: '99:99' }), 400, 'heure de transition invalide');
+    let handovers = (await alice.get('/api/custody/handovers?from=2026-11-01&to=2026-11-14')).body;
+    assert.strictEqual(handovers.length, 1);
+    assert.strictEqual(handovers[0].child_id, kid1); assert.strictEqual(handovers[0].location, 'Chez mamie'); assert.strictEqual(handovers[0].time, '18:00');
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-11-03', location: 'Chez papi', time: '19:00' }), 200, 'une transition déjà enregistrée ce jour est remplacée, pas dupliquée');
+    handovers = (await alice.get('/api/custody/handovers?from=2026-11-01&to=2026-11-14')).body;
+    assert.strictEqual(handovers.length, 1, 'toujours une seule ligne pour cet enfant et cette date');
+    assert.strictEqual(handovers[0].location, 'Chez papi'); assert.strictEqual(handovers[0].time, '19:00');
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-11-03', location: '', time: '' }), 200, 'lieu et heure vides = suppression');
+    handovers = (await alice.get('/api/custody/handovers?from=2026-11-01&to=2026-11-14')).body;
+    assert.strictEqual(handovers.length, 0, 'la ligne est supprimée plutôt que gardée vide');
+
     // Demandes d'échange de garde
     r = await alice.post('/api/swaps', { recipient_id: B, child_ids: [kid2], date_from: '2026-10-09', date_to: '2026-10-11', new_parent_id: A, message: 'Mariage', location: 'Chez mamie', time: '18:00' });
     ok(r, 200, 'swap'); const swapId = r.body.id;
@@ -778,6 +793,10 @@ async function main() {
     assert.ok(custodyBob.every((n) => n.child_id === kid1), 'Bob ne voit que les nuits de Léo');
     assert.ok(custodyCarla.every((n) => n.child_id === kid2), 'Carla ne voit que les nuits de Mia');
     ok(await bob.put('/api/custody', { date_from: '2026-11-11', date_to: '2026-11-11', child_ids: [kid2], parent_id: B }), 403, "Bob ne peut pas modifier la garde de Mia");
+    ok(await bob.put('/api/custody/handovers', { child_id: kid2, date: '2026-11-11', location: 'Chez Carla' }), 403, 'Bob ne peut pas définir une transition pour Mia');
+    ok(await alice.put('/api/custody/handovers', { child_id: kid2, date: '2026-11-11', location: 'École' }), 200);
+    assert.ok(!(await bob.get('/api/custody/handovers?from=2026-11-01&to=2026-11-14')).body.some((r) => r.child_id === kid2), 'Bob ne voit pas la transition de Mia');
+    assert.ok((await carla.get('/api/custody/handovers?from=2026-11-01&to=2026-11-14')).body.some((r) => r.child_id === kid2), 'Carla, elle, la voit');
     ok(await bob.post('/api/custody/generate', { pattern: 'halves', child_ids: [kid2], parent_a: A, parent_b: B, start: '2026-11-12', end: '2026-11-13' }), 403, "Bob ne peut pas générer un planning pour Mia");
     // La garde ne peut être attribuée qu'à un parent désigné de l'enfant, même par un administrateur.
     ok(await alice.put('/api/custody', { date_from: '2026-11-13', date_to: '2026-11-13', child_ids: [kid1], parent_id: C }), 400, "Carla n'est pas un parent désigné de Léo : attribution refusée");
@@ -806,6 +825,7 @@ async function main() {
     ok(await david.put(`/api/events/${evKid1.id}`, { title: 'Modifié par David' }), 403, "David ne peut pas modifier un événement de Léo, même sans toucher aux enfants");
     assert.ok((await david.get('/api/custody?from=2026-11-10&to=2026-11-10')).body.some((n) => n.child_id === kid1), 'David voit la garde de Léo');
     ok(await david.put('/api/custody', { date_from: '2026-11-15', date_to: '2026-11-15', child_ids: [kid1], parent_id: davidId }), 403, 'David ne peut pas modifier la garde de Léo');
+    ok(await david.put('/api/custody/handovers', { child_id: kid1, date: '2026-11-15', location: 'x' }), 403, 'David ne peut pas définir une transition pour Léo (lecture seule)');
     ok(await david.post('/api/custody/generate', { pattern: 'halves', child_ids: [kid1], parent_a: A, parent_b: B, start: '2026-11-20', end: '2026-11-21' }), 403, 'David ne peut pas générer un planning pour Léo');
     assert.ok((await david.get('/api/contacts')).body.some((c) => c.name === 'Pédiatre de Léo'), 'David voit le contact de Léo');
     ok(await david.post('/api/contacts', { circle_ids: [circle], name: 'x', child_id: kid1 }), 403, 'David ne peut pas créer un contact pour Léo');

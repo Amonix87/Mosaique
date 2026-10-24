@@ -459,6 +459,8 @@ L'agenda et la grille de garde affichent désormais le numéro de semaine ISO de
 
 Dans la fiche de chaque enfant (Famille → Enfants → Modifier), vous pouvez renseigner un lieu de transition habituel (avec des suggestions rapides : école, domicile de chaque membre de la famille — ou votre propre texte) et une heure habituelle. Cette information s'affiche en rappel discret au-dessus du planning de garde de cet enfant, dans l'onglet Garde. Les deux champs sont facultatifs et indépendants l'un de l'autre.
 
+**Au cas par cas** : sur le planning de garde, chaque jour où la garde change de parent (par rapport à la nuit précédente) affiche une petite épingle sur la case du jour. Elle permet de définir, pour ce seul jour, un lieu et/ou une heure différents de l'habitude (ex. : « chez mamie » pour un week-end particulier) — sans toucher au réglage habituel de l'enfant. L'épingle devient pleine une fois une transition personnalisée enregistrée ; un bouton « Réinitialiser » dans sa fenêtre l'efface et remet le lieu/l'heure habituels.
+
 ## Notifications push
 
 En plus des notifications internes et par e-mail, Mosaïque peut envoyer de vraies notifications push sur votre téléphone ou ordinateur — reçues même quand l'application n'est pas ouverte, exactement comme une application native. Aucune configuration n'est nécessaire : les clés nécessaires (VAPID) sont générées automatiquement au premier démarrage.

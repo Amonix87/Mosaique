@@ -1,4 +1,4 @@
-import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, emptyState, today, ymd, addDays, toDate, daysBetween, fmtDay, fmtDayY, fmtMonth, avatar, userById, childById, userName, readable, ago, mount, append, myEditableChildren, possibleCustodyParents, isoWeek, modal } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, emptyState, today, ymd, addDays, toDate, daysBetween, fmtDay, fmtDayY, fmtMonth, avatar, userById, childById, userName, readable, ago, mount, append, myEditableChildren, possibleCustodyParents, isoWeek, modal, handoverLocationField } from './core.js';
 
 let cursor = null;
 const gardeChildren = () => state.children.filter((c) => c.shared_custody);
@@ -48,7 +48,7 @@ export function generatorForm(preset = {}, done = () => {}) {
 export async function garde(root) {
   const now = new Date();
   if (!cursor) cursor = { y: now.getFullYear(), m: now.getMonth() };
-  let nights = []; let stats = { month: {}, year: {} }; let swaps = []; let holidaysByZone = {};
+  let nights = []; let stats = { month: {}, year: {} }; let swaps = []; let holidaysByZone = {}; let handovers = [];
   let anchor = null; let sel = null; // sélection de nuits { from, to }
   let chosenKids = null;
 
@@ -73,12 +73,16 @@ export async function garde(root) {
   async function load() {
     const from = ymd(new Date(cursor.y, cursor.m, 1));
     const to = ymd(new Date(cursor.y, cursor.m + 1, 0));
+    // Un jour avant le mois : permet de détecter une transition dès le 1er du mois, en comparant à la
+    // dernière nuit du mois précédent.
+    const fetchFrom = addDays(from, -1);
     const zones = [...new Set(gardeChildren().map((c) => c.zone))];
-    const [n, s, sw, ...hols] = await Promise.all([
-      get(`/custody?from=${from}&to=${to}`), get(`/custody/stats?month=${monthKey()}`), get('/swaps'),
+    const [n, s, sw, ho, ...hols] = await Promise.all([
+      get(`/custody?from=${fetchFrom}&to=${to}`), get(`/custody/stats?month=${monthKey()}`), get('/swaps'),
+      get(`/custody/handovers?from=${from}&to=${to}`),
       ...zones.map((z) => get(`/holidays?zone=${z}`)),
     ]);
-    nights = n; stats = s; swaps = sw;
+    nights = n; stats = s; swaps = sw; handovers = ho;
     holidaysByZone = Object.fromEntries(zones.map((z, i) => [z, hols[i].periods]));
     draw();
   }
@@ -102,6 +106,8 @@ export async function garde(root) {
     const days = new Date(cursor.y, cursor.m + 1, 0).getDate();
     const map = {};
     for (const n of nights) map[`${n.date}|${n.child_id}`] = n.parent_id;
+    const hoMap = {};
+    for (const r of handovers) hoMap[`${r.date}|${r.child_id}`] = r;
     const inSel = (d, childId) => sel && chosenKids && chosenKids.includes(childId) && d >= sel.from && d <= sel.to;
     mount(monthBox, ...kids.map((c) => {
       const tiles = [];
@@ -117,13 +123,26 @@ export async function garde(root) {
         const pid = map[`${date}|${c.id}`];
         const p = pid ? userById(pid) : null;
         const holiday = (holidaysByZone[c.zone] || []).some((x) => date >= x.start && date < x.end);
-        tiles.push(h('button', {
+        // Jour de transition : le parent change par rapport à la nuit précédente (les deux nuits doivent
+        // être renseignées). On compare toujours à la veille, y compris le 1er du mois (nuits du mois
+        // précédent chargées en plus dans load()).
+        const prevDate = ymd(new Date(cursor.y, cursor.m, d - 1));
+        const prevPid = map[`${prevDate}|${c.id}`];
+        const isTransition = pid && prevPid && pid !== prevPid;
+        const override = hoMap[`${date}|${c.id}`];
+        const dayBtn = h('button', {
           type: 'button', class: ['tile', p ? 'filled' : 'empty', inSel(date, c.id) ? 'sel' : '', date === today() ? 'today' : '', holiday ? 'hol' : ''].join(' '),
           style: p ? { background: p.color, color: readable(p.color) } : null,
           'aria-label': `${fmtDay(date)} : ${p ? c.name + ' chez ' + p.name : 'non renseigné'}`,
           'aria-pressed': !!inSel(date, c.id),
           onclick: () => pick(date, c.id),
-        }, d));
+        }, d);
+        tiles.push((isTransition || override) ? h('span', { class: 'tile-cell' }, dayBtn,
+          h('button', {
+            type: 'button', class: 'tile-pin' + (override ? ' set' : ''),
+            'aria-label': `Transition du ${fmtDay(date)} (${c.name}) : lieu et heure ${override ? 'personnalisés' : 'habituels'}`,
+            onclick: (e) => { e.stopPropagation(); handoverForm(date, c, override); },
+          }, icon('pin', 10))) : dayBtn);
         col = (col + 1) % 7;
       }
       return h('div', { class: 'child-month' },
@@ -169,6 +188,29 @@ export async function garde(root) {
         h('button', { class: 'btn', onclick: () => swapForm() }, icon('swap', 16), 'Demander un échange'),
         h('button', { class: 'btn ghost', onclick: () => apply(null) }, 'Effacer'),
         h('button', { class: 'btn ghost', onclick: () => { clearSel(); drawMonth(); drawBar(); } }, 'Annuler')));
+  }
+
+  // Lieu/heure de transition au cas par cas pour ce jour précis (remplace le lieu/heure habituel de
+  // l'enfant, défini dans Famille → Enfants, sans le modifier).
+  function handoverForm(date, child, existing) {
+    const habitual = [child.handover_location, child.handover_time].filter(Boolean).join(', ');
+    const close = formModal(`Transition du ${fmtDay(date)} — ${child.name}`, [
+      { name: 'location', ...handoverLocationField(existing ? existing.location : '', 'Lieu pour cette transition') },
+      { name: 'time', label: 'Heure pour cette transition', type: 'time', value: existing ? existing.time : '', hint: habitual ? `Habituellement : ${habitual}` : "Rien de défini comme lieu/heure habituel pour cet enfant." },
+    ], {
+      submit: 'Enregistrer',
+      onSubmit: async (v, closeForm) => {
+        await put('/custody/handovers', { child_id: child.id, date, location: v.location, time: v.time });
+        closeForm(); toast('Transition mise à jour'); load();
+      },
+      extra: existing ? h('button', {
+        type: 'button', class: 'btn ghost',
+        onclick: () => act(async () => {
+          await put('/custody/handovers', { child_id: child.id, date, location: '', time: '' });
+          close(); toast('Transition réinitialisée : lieu et heure habituels repris.'); load();
+        }),
+      }, 'Réinitialiser') : null,
+    });
   }
 
   function swapForm() {

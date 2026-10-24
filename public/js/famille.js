@@ -1,4 +1,4 @@
-import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, modal, opt, pageHead, avatar, TILE_COLORS, myCircles, applyMe, mount, append, publicOrigin } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, modal, opt, pageHead, avatar, TILE_COLORS, myCircles, applyMe, mount, append, publicOrigin, handoverLocationField } from './core.js';
 
 const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
@@ -58,17 +58,6 @@ function circleForm(c, done) {
       close(); toast(c ? 'Cercle modifié' : 'Cercle créé'); done();
     },
   });
-}
-
-// Lieu de transition : suggestions rapides (école, domicile de chacun) tout en acceptant un texte libre.
-function handoverLocationField(initialValue) {
-  const listId = 'handover-locations-' + Math.random().toString(36).slice(2, 8);
-  const options = ['École', ...state.users.map((u) => `Domicile de ${u.name}`)];
-  const input = h('input', { value: initialValue || '', list: listId, placeholder: 'École, domicile de…', maxlength: 200 });
-  const datalist = h('datalist', { id: listId }, options.map((o) => h('option', { value: o })));
-  const node = h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Lieu de transition habituel'), input, datalist,
-    h('span', { class: 'hint' }, "Suggestions (école, domicile d'un parent…) ou votre propre texte."));
-  return { node, get: () => input.value.trim() };
 }
 
 // Parents et lecteurs d'un enfant : deux listes liées. Un parent est retiré des lecteurs

@@ -1904,6 +1904,33 @@ api.put('/custody', (req, res) => {
   res.json({ ok: true });
 });
 
+// Lieu/heure de transition au cas par cas (remplace, pour un jour donné, le lieu/heure habituel de
+// l'enfant — voir handover_location/handover_time dans Famille → Enfants). Un enfant peut avoir au
+// plus une transition renseignée par date (UNIQUE(child_id,date)) : ça n'a pas de sens d'en avoir
+// deux le même jour.
+api.get('/custody/handovers', (req, res) => {
+  const { from, to } = req.query;
+  if (!validDate(from) || !validDate(to)) throw bad('Période invalide.');
+  const rows = db.prepare('SELECT child_id, date, location, time FROM custody_handovers WHERE date>=? AND date<=?').all(from, to);
+  res.json(rows.filter((r) => canSeeChild(req.user, r.child_id)));
+});
+api.put('/custody/handovers', (req, res) => {
+  const { child_id, date, location, time } = req.body || {};
+  if (!validDate(date)) throw bad('Date invalide.');
+  const kids = checkChildren([child_id], req);
+  if (time && !validTime(time)) throw bad('Heure de transition invalide.');
+  const loc = location ? String(location).trim().slice(0, 200) : null;
+  const t = time || null;
+  if (!loc && !t) {
+    db.prepare('DELETE FROM custody_handovers WHERE child_id=? AND date=?').run(kids[0], date);
+  } else {
+    db.prepare(`INSERT INTO custody_handovers(child_id,date,location,time) VALUES(?,?,?,?)
+      ON CONFLICT(child_id,date) DO UPDATE SET location=excluded.location, time=excluded.time`).run(kids[0], date, loc, t);
+  }
+  emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
+  res.json({ ok: true });
+});
+
 // Numéro de semaine ISO 8601 (semaines du lundi au dimanche, semaine 1 = celle contenant le premier jeudi de l'année).
 function isoWeek(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);

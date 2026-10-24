@@ -628,4 +628,20 @@ if (invoicesExtIdx && /circle_id/.test(invoicesExtIdx.sql)) {
   `);
 }
 
+// Lieu/heure d'une transition de garde ponctuelle, pour un enfant et une date donnés — remplace,
+// pour ce seul jour, le lieu/heure habituel de l'enfant (handover_location/handover_time, voir
+// plus haut). Une ligne avec les deux colonnes NULL n'a pas de raison d'exister (voir PUT
+// /custody/handovers côté serveur, qui supprime la ligne plutôt que d'en garder une vide).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS custody_handovers (
+    id INTEGER PRIMARY KEY,
+    child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    location TEXT,
+    time TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_custody_handovers ON custody_handovers(child_id, date);
+`);
+
 module.exports = { db, DATA_DIR, MEDIA_DIR };

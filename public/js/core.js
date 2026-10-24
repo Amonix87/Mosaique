@@ -87,6 +87,7 @@ const ICONS = {
   phone: '<path d="M6 3h3l2 5-2.5 1.5a11 11 0 0 0 6 6L16 13l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 4 5a2 2 0 0 1 2-2z"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
   star: '<path d="M12 3.5l2.6 5.5 6 .8-4.3 4.2 1 6-5.3-2.9-5.3 2.9 1-6-4.3-4.2 6-.8z"/>',
+  pin: '<path d="M12 21s7-5.5 7-11a7 7 0 0 0-14 0c0 5.5 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/>',
 };
 export function icon(name, size = 20) {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -457,6 +458,18 @@ export function possibleCustodyParents(childIds) {
   return state.users.filter((u) => restricted.every((k) => k.parent_ids.includes(u.id)));
 }
 export const userName = (id) => (userById(id) ? userById(id).name : 'Ancien membre');
+
+// Lieu de transition : suggestions rapides (école, domicile de chacun) tout en acceptant un texte
+// libre — utilisé pour le lieu habituel d'un enfant (Famille) et pour une transition ponctuelle (Garde).
+export function handoverLocationField(initialValue, label = 'Lieu de transition habituel') {
+  const listId = 'handover-locations-' + Math.random().toString(36).slice(2, 8);
+  const options = ['École', ...state.users.map((u) => `Domicile de ${u.name}`)];
+  const input = h('input', { value: initialValue || '', list: listId, placeholder: 'École, domicile de…', maxlength: 200 });
+  const datalist = h('datalist', { id: listId }, options.map((o) => h('option', { value: o })));
+  const node = h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), input, datalist,
+    h('span', { class: 'hint' }, "Suggestions (école, domicile d'un parent…) ou votre propre texte."));
+  return { node, get: () => input.value.trim() };
+}
 
 export function readable(bg) {
   const n = parseInt(bg.slice(1), 16);
