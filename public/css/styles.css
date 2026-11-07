@@ -320,6 +320,24 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .trend-label { font-size: .75rem; color: var(--ink-soft); margin-top: .1rem; text-transform: capitalize; }
 .split-rows { display: flex; flex-direction: column; gap: .4rem; }
 .split-row { display: flex; align-items: center; gap: .5rem; justify-content: space-between; }
+.split-row input { width: 5.2rem; text-align: right; }
+/* Barre de répartition d'une dépense (voir splitEditor dans budget.js) : une couleur par personne, et une
+   poignée à glisser sur chaque limite. Les poignées sont en dehors de .split-segs (qui rogne ses coins
+   arrondis) pour ne pas être coupées. */
+.split-editor { display: flex; flex-direction: column; gap: .6rem; }
+.split-track { position: relative; height: 40px; margin: 0 10px; }
+.split-segs { display: flex; height: 100%; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+.split-seg { height: 100%; display: flex; align-items: center; justify-content: center; font-size: .78rem; font-weight: 600;
+  white-space: nowrap; overflow: hidden; transition: width .08s linear; }
+.split-handle { position: absolute; top: -4px; bottom: -4px; width: 20px; margin-left: -10px; padding: 0; border: 0; background: transparent;
+  cursor: ew-resize; touch-action: none; z-index: 1; }
+.split-handle::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 6px; margin-left: -3px; border-radius: 3px;
+  background: var(--card); border: 2px solid var(--ink); box-sizing: border-box; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); }
+.split-handle:hover::before, .split-handle:active::before { background: var(--ink); }
+.split-handle:focus-visible { outline: none; }
+.split-handle:focus-visible::before { outline: 3px solid var(--ring); outline-offset: 2px; }
+.split-equal { align-self: flex-start; }
+.split-total { margin: 0; font-size: .85rem; }
 
 /* ── Documents / contacts ── */
 .doc-group h3 { font-size: .85rem; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .03em; margin: 1rem 0 .4rem; }

@@ -1466,8 +1466,16 @@ api.post('/addons/:id/sync', requireAdmin, async (req, res, next) => {
 });
 
 /* Dépenses partagées */
+// Une dépense issue d'un événement (le prix se saisit sur l'événement, voir createExpenseForEvent)
+// existe dès la saisie du prix, mais n'a pas à figurer dans Budget — historique, totaux par catégorie,
+// soldes — tant que le rendez-vous n'a pas eu lieu : ce n'est pas encore une dépense réelle. Elle
+// apparaît d'elle-même une fois l'heure de début passée (un événement sur la journée entière compte
+// comme passé dès le jour même : « AAAA-MM-JJ » est avant « AAAA-MM-JJTHH:MM »).
+const PENDING_EVENT_EXPENSE_SQL = '(event_id IS NULL OR event_id NOT IN (SELECT id FROM events WHERE starts_at > ?))';
+const pendingEventIds = () => new Set(db.prepare('SELECT id FROM events WHERE starts_at > ?').all(nowLocal()).map((r) => r.id));
 mountResource('expenses', 'expenses', { title: 's', amount_cents: 'cents', category: 's?', date: 'd', paid_by: 'i', split: 'split', child_id: 'i?' }, {
   order: 'ORDER BY date DESC, id DESC',
+  filter: (rows) => { const pending = pendingEventIds(); return rows.filter((e) => !e.event_id || !pending.has(e.event_id)); },
   decode: (r) => ({ ...r, split: parseJ(r.split, {}) }),
   validate: (v) => assertSplitAllowed(v.child_id, parseJ(v.split, {})),
   beforeUpdate: (row, b, sets, vals, req) => {
@@ -1560,7 +1568,7 @@ function computeShares(amount, split) {
 function computeBalances(circleId) {
   const bal = {};
   const add = (u, v) => { bal[u] = (bal[u] || 0) + v; };
-  for (const e of db.prepare('SELECT * FROM expenses WHERE circle_id=?').all(circleId)) {
+  for (const e of db.prepare(`SELECT * FROM expenses WHERE circle_id=? AND ${PENDING_EVENT_EXPENSE_SQL}`).all(circleId, nowLocal())) {
     add(e.paid_by, e.amount_cents);
     for (const [u, s] of Object.entries(computeShares(e.amount_cents, parseJ(e.split, {})))) add(Number(u), -s);
   }
@@ -1594,7 +1602,7 @@ api.get('/expenses/summary', (req, res) => {
   if (/^\d{4}$/.test(req.query.year || '')) { scope = 'substr(date,1,4)=?'; arg = [req.query.year]; period = { kind: 'year', value: req.query.year }; }
   else if (req.query.all === '1') { scope = '1=1'; arg = []; period = { kind: 'all', value: null }; }
   const cats = db.prepare(`SELECT COALESCE(category,'Autre') category, SUM(amount_cents) total FROM expenses
-    WHERE circle_id=? AND ${scope} GROUP BY COALESCE(category,'Autre') ORDER BY total DESC`).all(cid, ...arg);
+    WHERE circle_id=? AND ${scope} AND ${PENDING_EVENT_EXPENSE_SQL} GROUP BY COALESCE(category,'Autre') ORDER BY total DESC`).all(cid, ...arg, nowLocal());
   const settlements = db.prepare('SELECT * FROM settlements WHERE circle_id=? ORDER BY date DESC, id DESC').all(cid);
   res.json({ ...computeBalances(cid), categories: cats, month, period, settlements });
 });

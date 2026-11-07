@@ -101,6 +101,44 @@ async function testDateUtils() {
   console.log('✔ Fonctions de date française vérifiées');
 }
 
+// Répartition d'une dépense (barre à curseurs, public/js/split.js) : quoi qu'on fasse, le total reste 100 %.
+async function testSplit() {
+  const S = await import('../public/js/split.js');
+  const sum = (sp) => Math.round(Object.values(sp).reduce((a, b) => a + b, 0) * 10) / 10;
+  assert.deepStrictEqual(S.equalSplit([1, 2]), { 1: 50, 2: 50 });
+  assert.deepStrictEqual(S.equalSplit([1, 2, 3]), { 1: 33.3, 2: 33.3, 3: 33.4 }, 'la dernière personne absorbe le reste');
+  assert.deepStrictEqual(S.equalSplit([]), {});
+  assert.deepStrictEqual(S.setShare([1], { 1: 100 }, 1, 30), { 1: 100 }, 'une seule personne : toujours 100 %');
+  // Déplacer une limite ne change que les deux parts voisines et ne peut pas franchir la limite suivante.
+  let sp = S.moveBoundary([1, 2, 3], { 1: 20, 2: 30, 3: 50 }, 0, 40);
+  assert.deepStrictEqual(sp, { 1: 40, 2: 10, 3: 50 });
+  sp = S.moveBoundary([1, 2, 3], sp, 0, 99);
+  assert.deepStrictEqual(sp, { 1: 50, 2: 0, 3: 50 }, 'bloquée par la limite voisine');
+  sp = S.moveBoundary([1, 2, 3], sp, 1, -20);
+  assert.deepStrictEqual(sp, { 1: 50, 2: 0, 3: 50 }, 'ni avant la précédente');
+  // Fixer la part de quelqu'un : les autres se partagent le reste au prorata.
+  assert.deepStrictEqual(S.setShare([1, 2, 3], { 1: 20, 2: 30, 3: 50 }, 1, 60), { 1: 60, 2: 15, 3: 25 });
+  assert.deepStrictEqual(S.setShare([1, 2, 3], { 1: 0, 2: 0, 3: 100 }, 3, 0), { 1: 50, 2: 50, 3: 0 }, 'les autres étaient à 0 : à égalité');
+  assert.deepStrictEqual(S.setShare([1, 2], { 1: 50, 2: 50 }, 1, 150), { 1: 100, 2: 0 }, 'bornée à 100 %');
+  assert.ok(S.isFull({ 1: 33.3, 2: 33.3, 3: 33.4 }) && !S.isFull({ 1: 40, 2: 40 }));
+  // Aléatoire : 1 à 6 personnes, enchaînement de mouvements — jamais autre chose que 100 %, jamais négatif.
+  for (let n = 1; n <= 6; n++) {
+    const ids = Array.from({ length: n }, (_, i) => i + 1);
+    for (let t = 0; t < 200; t++) {
+      let cur = S.equalSplit(ids);
+      for (let k = 0; k < 6; k++) {
+        const r = Math.random() * 120 - 10;
+        cur = Math.random() < 0.5 ? S.setShare(ids, cur, 1 + Math.floor(Math.random() * n), r) : S.moveBoundary(ids, cur, Math.floor(Math.random() * Math.max(1, n - 1)), r);
+        assert.strictEqual(sum(cur), 100, `total != 100 pour ${JSON.stringify(cur)}`);
+        assert.ok(Object.values(cur).every((v) => v >= 0 && v <= 100), 'part hors de 0–100');
+      }
+    }
+  }
+  assert.strictEqual(S.fmtPct(33.3), '33,3');
+  assert.strictEqual(S.fmtPct(50), '50');
+  console.log('✔ Répartition à curseurs : le total reste toujours 100 % vérifié');
+}
+
 // Détection de l'appareil pour l'invitation à installer l'application (fonctions pures, sans navigateur).
 function testInstallDetection() {
   const { describeDevice, iosPushCapable, isStandalone, STEPS, PUSH_STEPS, plainStep } = require('../public/js/install.js');
@@ -904,11 +942,15 @@ async function main() {
     assert.strictEqual((await alice.get('/api/expenses')).body.filter((e) => e.title === 'Cantine hebdo').length, 2, 'supprimer le modèle conserve les dépenses déjà créées');
 
     // ── Événements : catégorie, et prix qui alimente Budget ──
-    const evP = (await alice.post('/api/events', { circle_id: circle, title: 'Dentiste', starts_at: '2026-11-20T10:00', category: 'Santé', price_cents: 4500, child_ids: [kid1] })).body;
+    // Les rendez-vous à prix de ce bloc sont datés dans le passé (jours relatifs à aujourd'hui, donc valables
+    // quelle que soit la date d'exécution) : une dépense d'événement n'entre dans Budget qu'une fois l'événement passé.
+    const pastDay = (n) => localDT(new Date(Date.now() - n * 86400000)).slice(0, 10);
+    const [D20, D21, D22, D23, D24] = [10, 9, 8, 7, 6].map(pastDay);
+    const evP = (await alice.post('/api/events', { circle_id: circle, title: 'Dentiste', starts_at: `${D20}T10:00`, category: 'Santé', price_cents: 4500, child_ids: [kid1] })).body;
     assert.strictEqual(evP.category, 'Santé');
     let exP = (await alice.get('/api/expenses')).body.find((e) => e.event_id === evP.id);
     assert.ok(exP, 'un prix sur un événement crée la dépense correspondante dans Budget');
-    assert.deepStrictEqual([exP.amount_cents, exP.category, exP.paid_by, exP.date, exP.child_id, exP.title], [4500, 'Santé', A, '2026-11-20', kid1, 'Dentiste']);
+    assert.deepStrictEqual([exP.amount_cents, exP.category, exP.paid_by, exP.date, exP.child_id, exP.title], [4500, 'Santé', A, D20, kid1, 'Dentiste']);
     assert.deepStrictEqual(exP.split, { [A]: 50, [B]: 50 }, 'partagée entre les parents désignés de Léo, par défaut');
     ok(await alice.put(`/api/events/${evP.id}`, { price_cents: 5000 }), 200);
     assert.strictEqual((await alice.get('/api/expenses')).body.find((e) => e.id === exP.id).amount_cents, 5000, 'changer le prix met la dépense à jour');
@@ -916,40 +958,61 @@ async function main() {
     ok(await bob.put(`/api/events/${evP.id}`, { title: 'Dentiste (déplacé)' }), 200, "un autre parent peut en revanche modifier l'événement sans toucher au prix");
     assert.strictEqual((await alice.get('/api/expenses')).body.find((e) => e.id === exP.id).title, 'Dentiste (déplacé)', 'le nouveau titre est répercuté sur la dépense');
     ok(await alice.put(`/api/expenses/${exP.id}`, { amount_cents: 5200 }), 200);
-    assert.strictEqual((await alice.get('/api/events/range?from=2026-11-20&to=2026-11-20')).body.find((e) => e.id === evP.id).price_cents, 5200, "modifier la dépense met aussi à jour le prix affiché sur l'événement");
-    const evRange = (await alice.get('/api/events/range?from=2026-11-20&to=2026-11-20')).body.find((e) => e.id === evP.id);
+    assert.strictEqual((await alice.get(`/api/events/range?from=${D20}&to=${D20}`)).body.find((e) => e.id === evP.id).price_cents, 5200, "modifier la dépense met aussi à jour le prix affiché sur l'événement");
+    const evRange = (await alice.get(`/api/events/range?from=${D20}&to=${D20}`)).body.find((e) => e.id === evP.id);
     assert.strictEqual(evRange.category, 'Santé');
     assert.strictEqual(evRange.price_paid_by, A, "sans choix explicite, le payeur mémorisé est celui qui a saisi le prix");
 
     // Payeur choisi pour le prix d'un événement (pas forcément le créateur)
-    const evPay = (await alice.post('/api/events', { circle_id: circle, title: 'Orthodontiste', starts_at: '2026-11-24T10:00', price_cents: 8000, price_paid_by: davidId, child_ids: [kid1] })).body;
+    const evPay = (await alice.post('/api/events', { circle_id: circle, title: 'Orthodontiste', starts_at: `${D24}T10:00`, price_cents: 8000, price_paid_by: davidId, child_ids: [kid1] })).body;
     let exPay = (await alice.get('/api/expenses')).body.find((e) => e.event_id === evPay.id);
     assert.strictEqual(exPay.paid_by, davidId, "David (ni parent, ni créateur) est bien le payeur choisi");
     assert.deepStrictEqual(exPay.split, { [A]: 50, [B]: 50 }, "il avance l'argent sans faire partie du partage, réservé aux parents de Léo");
     assert.strictEqual(exPay.created_by, A, 'la dépense reste celle du créateur de l\'événement : lui seul pourra la modifier');
-    ok(await alice.post('/api/events', { circle_id: c2, title: 'Payeur hors cercle', starts_at: '2026-11-24T11:00', price_cents: 1000, price_paid_by: C }), 400, "Carla n'est pas membre du cercle Coparents : elle ne peut pas être payeuse");
+    ok(await alice.post('/api/events', { circle_id: c2, title: 'Payeur hors cercle', starts_at: `${D24}T11:00`, price_cents: 1000, price_paid_by: C }), 400, "Carla n'est pas membre du cercle Coparents : elle ne peut pas être payeuse");
     ok(await alice.put(`/api/events/${evPay.id}`, { price_paid_by: B }), 200, 'changer le payeur depuis l\'événement');
     assert.strictEqual((await alice.get('/api/expenses')).body.find((e) => e.id === exPay.id).paid_by, B, 'la dépense suit');
     ok(await bob.put(`/api/events/${evPay.id}`, { price_paid_by: A }), 403, "seul le créateur de l'événement change le payeur");
     ok(await alice.put(`/api/expenses/${exPay.id}`, { paid_by: A }), 200, 'changer le payeur depuis Budget');
-    assert.strictEqual((await alice.get('/api/events/range?from=2026-11-24&to=2026-11-24')).body.find((e) => e.id === evPay.id).price_paid_by, A, "l'événement suit aussi");
+    assert.strictEqual((await alice.get(`/api/events/range?from=${D24}&to=${D24}`)).body.find((e) => e.id === evPay.id).price_paid_by, A, "l'événement suit aussi");
     ok(await alice.put(`/api/events/${evPay.id}`, { price_cents: null, price_paid_by: null }), 200);
-    assert.strictEqual((await alice.get('/api/events/range?from=2026-11-24&to=2026-11-24')).body.find((e) => e.id === evPay.id).price_paid_by, null, 'retirer le prix efface aussi le payeur');
+    assert.strictEqual((await alice.get(`/api/events/range?from=${D24}&to=${D24}`)).body.find((e) => e.id === evPay.id).price_paid_by, null, 'retirer le prix efface aussi le payeur');
     ok(await alice.put(`/api/events/${evP.id}`, { repeat: 'weekly' }), 400, "un événement qui a un prix ne peut pas devenir récurrent");
-    ok(await alice.post('/api/events', { circle_id: circle, title: 'Cours de piano', starts_at: '2026-11-21T10:00', repeat: 'weekly', price_cents: 3000 }), 400, "pas de prix sur un événement récurrent (utiliser une dépense récurrente)");
-    ok(await alice.post('/api/events', { circle_id: circle, title: 'Catégorie inconnue', starts_at: '2026-11-21T10:00', category: 'Inventée' }), 400, 'catégorie inconnue refusée');
+    ok(await alice.post('/api/events', { circle_id: circle, title: 'Cours de piano', starts_at: `${D21}T10:00`, repeat: 'weekly', price_cents: 3000 }), 400, "pas de prix sur un événement récurrent (utiliser une dépense récurrente)");
+    ok(await alice.post('/api/events', { circle_id: circle, title: 'Catégorie inconnue', starts_at: `${D21}T10:00`, category: 'Inventée' }), 400, 'catégorie inconnue refusée');
     ok(await alice.put(`/api/events/${evP.id}`, { price_cents: null }), 200, 'retirer le prix');
     assert.ok(!(await alice.get('/api/expenses')).body.some((e) => e.event_id === evP.id), 'retire aussi la dépense associée');
-    const evQ = (await alice.post('/api/events', { circle_id: circle, title: 'Sortie ciné', starts_at: '2026-11-22T15:00', category: 'Famille', price_cents: 2000 })).body;
+    const evQ = (await alice.post('/api/events', { circle_id: circle, title: 'Sortie ciné', starts_at: `${D22}T15:00`, category: 'Famille', price_cents: 2000 })).body;
     const exQ = (await alice.get('/api/expenses')).body.find((e) => e.event_id === evQ.id);
     assert.strictEqual(exQ.category, 'Loisirs', "la catégorie d'événement « Famille » range la dépense en « Loisirs »");
     ok(await alice.del(`/api/events/${evQ.id}`), 200);
     const exQAfter = (await alice.get('/api/expenses')).body.find((e) => e.id === exQ.id);
     assert.ok(exQAfter && exQAfter.event_id === null, "supprimer l'événement ne supprime jamais silencieusement une dépense : elle est conservée, détachée");
-    const evR = (await alice.post('/api/events', { circle_id: circle, title: 'Coiffeur', starts_at: '2026-11-23T15:00', price_cents: 1500 })).body;
+    const evR = (await alice.post('/api/events', { circle_id: circle, title: 'Coiffeur', starts_at: `${D23}T15:00`, price_cents: 1500 })).body;
     const exR = (await alice.get('/api/expenses')).body.find((e) => e.event_id === evR.id);
     ok(await alice.del(`/api/expenses/${exR.id}`), 200);
-    assert.strictEqual((await alice.get('/api/events/range?from=2026-11-23&to=2026-11-23')).body.find((e) => e.id === evR.id).price_cents, null, "supprimer la dépense efface le prix sur l'événement");
+    assert.strictEqual((await alice.get(`/api/events/range?from=${D23}&to=${D23}`)).body.find((e) => e.id === evR.id).price_cents, null, "supprimer la dépense efface le prix sur l'événement");
+
+    // Rendez-vous à venir : le prix est bien enregistré sur l'événement, mais la dépense ne figure ni dans
+    // l'historique, ni dans les totaux par catégorie, ni dans les soldes tant que le rendez-vous n'a pas eu lieu.
+    const budgetBefore = (await alice.get(`/api/expenses/summary?circle_id=${circle}&all=1`)).body;
+    const pendingStart = localDT(new Date(Date.now() + 3 * 86400000));
+    const evF = (await alice.post('/api/events', { circle_id: circle, title: 'Rdv à venir', starts_at: pendingStart, category: 'Santé', price_cents: 7700, child_ids: [kid1] })).body;
+    const pendingDay = pendingStart.slice(0, 10);
+    assert.strictEqual((await alice.get(`/api/events/range?from=${pendingDay}&to=${pendingDay}`)).body.find((e) => e.id === evF.id).price_cents, 7700, 'le prix reste visible sur le rendez-vous');
+    assert.ok(!(await alice.get('/api/expenses')).body.some((e) => e.event_id === evF.id), 'rendez-vous à venir : absent de l\'historique Budget');
+    assert.ok(!(await bob.get('/api/expenses')).body.some((e) => e.event_id === evF.id), 'pour tout le monde, pas seulement son créateur');
+    const budgetPending = (await alice.get(`/api/expenses/summary?circle_id=${circle}&all=1`)).body;
+    assert.deepStrictEqual(budgetPending.categories, budgetBefore.categories, 'et absent des totaux par catégorie');
+    assert.deepStrictEqual(budgetPending.balances, budgetBefore.balances, 'et des soldes');
+    ok(await alice.put(`/api/events/${evF.id}`, { starts_at: `${pastDay(2)}T10:00` }), 200, 'le rendez-vous passe dans le passé');
+    const exF = (await alice.get('/api/expenses')).body.find((e) => e.event_id === evF.id);
+    assert.ok(exF && exF.amount_cents === 7700 && exF.date === pastDay(2), 'une fois passé, la dépense apparaît dans Budget');
+    const budgetDone = (await alice.get(`/api/expenses/summary?circle_id=${circle}&all=1`)).body;
+    const santeOf = (r) => (r.categories.find((c) => c.category === 'Santé') || { total: 0 }).total;
+    assert.strictEqual(santeOf(budgetDone), santeOf(budgetBefore) + 7700, 'elle compte alors dans les totaux par catégorie');
+    assert.strictEqual(budgetDone.balances[A], (budgetBefore.balances[A] || 0) + 3850, 'et dans les soldes : Alice a payé, 50/50 avec Bob');
+    ok(await alice.put(`/api/events/${evF.id}`, { price_cents: null }), 200);
 
     // ── Recherche dans l'agenda (passé et à venir) ──
     const searchIds = async (client, q) => (await client.get(`/api/events/search?q=${encodeURIComponent(q)}`)).body;
@@ -1319,4 +1382,4 @@ async function main() {
 testHolidaysParsing();
 testEportailHistoryParsing();
 testInstallDetection();
-testDateUtils().then(main).catch((e) => { console.error('\n✘', e.message); process.exit(1); });
+testDateUtils().then(testSplit).then(main).catch((e) => { console.error('\n✘', e.message); process.exit(1); });

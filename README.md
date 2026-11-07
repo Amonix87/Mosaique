@@ -9,7 +9,7 @@ Application d'organisation familiale **auto-hébergée**, pensée pour les famil
 - **SOS remplacement** — signalez un imprévu, le premier membre disponible prend le relais
 - **Tâches** avec assignation, échéance et rappel
 - **Liste de courses** partagée
-- **Budget partagé** — dépenses avec répartition personnalisée (%), calcul automatique des remboursements minimaux, historique par catégorie
+- **Budget partagé** — dépenses avec répartition personnalisée (barre à curseurs, toujours 100 %), calcul automatique des remboursements minimaux, historique par catégorie
 - **Documents** partagés (carnets de santé, jugements, factures…)
 - **Contacts** (médecins, école, baby-sitters…)
 - **Fil familial** (photos et nouvelles) et **messagerie** par cercle
@@ -416,6 +416,12 @@ La page Aide sépare ce qui concerne tout le monde de ce qui relève de l'admini
 Les pastilles de choix de cercle (Budget, Messages...) sont désormais partagées : la surbrillance suit le cercle choisi, qui reste le même d'une page à l'autre.
 
 Chaque événement peut avoir une catégorie (Rendez-vous, Santé, École, Activité, Famille, Autre), affichée comme étiquette. Renseigner un **prix** crée une dépense dans Budget : le champ « Payé par » désigne qui a payé (par défaut celui qui saisit le prix, mais n'importe quel membre du cercle est possible — un beau-parent peut avancer l'argent sans faire partie du partage), le partage se fait entre les parents désignés du premier enfant concerné (à défaut, tout le cercle), et la catégorie suit (Santé→Santé, École→École, Activité→Activités, Famille→Loisirs, sinon Autre). Prix, payeur et dépense restent synchronisés dans les deux sens ; retirer le prix supprime la dépense, mais supprimer l'événement la conserve (jamais de suppression silencieuse d'une écriture financière). Seul le créateur de l'événement peut poser ou changer le prix et le payeur, qui ne sont pas disponibles pour un événement récurrent — pour un paiement régulier, utiliser une dépense récurrente.
+
+**Un rendez-vous à venir n'est pas encore une dépense** : le prix saisi reste affiché sur l'événement (avec la mention « apparaîtra dans Budget après l'événement »), mais la dépense ne figure ni dans l'historique, ni dans les totaux par catégorie, ni dans les comptes tant que le rendez-vous n'a pas eu lieu. Elle apparaît d'elle-même dès l'heure de début passée (un événement sur la journée entière compte comme passé dès le jour même).
+
+## Répartition d'une dépense : une barre à curseurs, toujours à 100 %
+
+Dans le formulaire d'une dépense, la répartition entre les personnes se règle sur une **barre colorée** (une couleur par personne) : glissez la poignée située entre deux personnes (souris ou doigt), ou, au clavier, placez-vous dessus et utilisez les flèches (Maj pour aller par 5 %). Déplacer une limite ne fait que céder de la place à la personne voisine, donc le total vaut toujours exactement 100 % — il n'y a plus de « répartition ne totalise pas 100 % » à corriger. Les champs chiffrés sous la barre restent utilisables : en modifier un répartit automatiquement le reste entre les autres, au prorata de leur part actuelle. Le bouton « Répartir à égalité » remet un partage égal.
 
 ## Conjoint·e notifié·e automatiquement
 

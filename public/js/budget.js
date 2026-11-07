@@ -1,14 +1,97 @@
-import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2 } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2, readable } from './core.js';
+import { equalSplit, isFull, boundaries, moveBoundary, setShare, fmtPct } from './split.js';
 
 const MONTH_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
 
 const CATS = ['École', 'Santé', 'Loisirs', 'Habillement', 'Cantine', 'Activités', 'Autre'];
 const FREQS = { weekly: 'Toutes les semaines', monthly: 'Tous les mois', quarterly: 'Tous les trimestres', yearly: 'Tous les ans' };
 
-function splitEqually(ids) {
-  const n = ids.length; const base = Math.floor(1000 / n); const out = {};
-  ids.forEach((id, i) => { out[id] = (i === n - 1 ? 1000 - base * (n - 1) : base) / 10; });
-  return out;
+/* ── Répartition d'une dépense : une barre dont chaque couleur est une personne, avec une poignée à
+   glisser entre deux personnes consécutives (souris, doigt, ou flèches du clavier). Le total vaut
+   100 % par construction : déplacer une limite ne fait que céder de la place au voisin. Les champs
+   chiffrés font de même — modifier l'un répartit le reste entre les autres. `split` est modifié
+   sur place (c'est l'objet que le formulaire enverra). Calculs : voir split.js. ── */
+function splitEditor(ids, split) {
+  const colorOf = (id) => (userById(id) || {}).color || '#9AA1B2';
+  const segs = ids.map((id) => h('div', { class: 'split-seg', style: { background: colorOf(id), color: readable(colorOf(id)) } }));
+  const inputs = ids.map((id) => h('input', { type: 'number', min: 0, max: 100, step: 0.1, 'aria-label': `Part de ${userName(id)} (%)`,
+    oninput: (e) => { if (e.target.value !== '') apply(setShare(ids, split, id, Number(e.target.value)), e.target); },
+    onchange: () => refresh() }));
+  const track = h('div', { class: 'split-track' });
+  const totalLine = h('p', { class: 'muted split-total' });
+  const handles = [];
+
+  function refresh(skipInput) {
+    const b = boundaries(ids, split);
+    ids.forEach((id, i) => {
+      const v = Number(split[id]) || 0;
+      segs[i].style.width = `${v}%`;
+      segs[i].textContent = v >= 22 ? `${userName(id)} ${fmtPct(v)} %` : v >= 7 ? `${fmtPct(v)} %` : '';
+      segs[i].title = `${userName(id)} : ${fmtPct(v)} %`;
+      if (inputs[i] !== skipInput) inputs[i].value = String(Math.round(v * 10) / 10);
+    });
+    handles.forEach((el, k) => {
+      el.style.left = `${b[k] / 10}%`;
+      el.setAttribute('aria-valuenow', String(Math.round(b[k]) / 10));
+      el.setAttribute('aria-valuetext', `${userName(ids[k])} ${fmtPct(Number(split[ids[k]]) || 0)} %, ${userName(ids[k + 1])} ${fmtPct(Number(split[ids[k + 1]]) || 0)} %`);
+    });
+    totalLine.textContent = isFull(split)
+      ? 'Total : 100 %' + (ids.length > 1 ? ' — glissez les poignées ou saisissez une part : les autres s\'ajustent.' : '')
+      : 'Total : ' + fmtPct(Object.values(split).reduce((a, c) => a + c, 0)) + ' %';
+  }
+  function apply(next, skipInput) {
+    for (const k of Object.keys(split)) delete split[k];
+    Object.assign(split, next);
+    refresh(skipInput);
+  }
+
+  // Une poignée par limite entre deux personnes. Si plusieurs limites se superposent (une part à 0 %), on
+  // départage au premier mouvement : vers la droite c'est la dernière du tas qui avance, vers la gauche la première.
+  ids.slice(0, -1).forEach((_, k) => {
+    const el = h('button', { type: 'button', class: 'split-handle', role: 'slider', 'aria-valuemin': 0, 'aria-valuemax': 100,
+      'aria-label': `Limite entre ${userName(ids[k])} et ${userName(ids[k + 1])}` });
+    let drag = null;
+    const pctAt = (e) => { const r = track.getBoundingClientRect(); return r.width ? Math.round(((e.clientX - r.left) / r.width) * 100) : 0; };
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      const b = boundaries(ids, split);
+      drag = { idx: k, decided: false, tied: b.map((v, i) => (v === b[k] ? i : -1)).filter((i) => i >= 0) };
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const b = boundaries(ids, split);
+      const pct = pctAt(e);
+      if (!drag.decided && pct !== b[drag.idx] / 10) {
+        drag.decided = true;
+        if (drag.tied.length > 1) drag.idx = pct > b[drag.idx] / 10 ? Math.max(...drag.tied) : Math.min(...drag.tied);
+      }
+      apply(moveBoundary(ids, split, drag.idx, pct));
+    });
+    const stop = () => { drag = null; };
+    el.addEventListener('pointerup', stop);
+    el.addEventListener('pointercancel', stop);
+    el.addEventListener('keydown', (e) => {
+      const step = e.shiftKey ? 5 : 1;
+      const b = boundaries(ids, split)[k] / 10;
+      const next = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? b - step : e.key === 'ArrowRight' || e.key === 'ArrowUp' ? b + step : null;
+      if (next === null) return;
+      e.preventDefault();
+      apply(moveBoundary(ids, split, k, next));
+    });
+    handles.push(el);
+  });
+
+  track.append(h('div', { class: 'split-segs' }, segs), ...handles);
+  const node = h('div', { class: 'split-editor', role: 'group', 'aria-label': 'Répartition de la dépense' },
+    track,
+    h('div', { class: 'split-rows' }, ids.map((id, i) => h('label', { class: 'split-row' },
+      h('span', { class: 'row gap center' }, h('span', { class: 'dot', style: { background: colorOf(id) } }), userName(id)),
+      h('span', { class: 'row gap center' }, inputs[i], '%')))),
+    ids.length > 1 ? h('button', { type: 'button', class: 'btn small split-equal', onclick: () => apply(equalSplit(ids)) }, 'Répartir à égalité') : null,
+    totalLine);
+  refresh();
+  return node;
 }
 
 // Seule la personne qui a créé une ligne peut la modifier ou la supprimer (le serveur l'impose aussi).
@@ -26,8 +109,7 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
   let childId = editing ? (editing.child_id ?? null) : null;
   let split = {};
   const paidBySelect = h('select', {});
-  const sliders = h('div', { class: 'split-rows' });
-  const total = h('p', { class: 'muted' });
+  const sliders = h('div', { class: 'split-box' });
 
   // Si l'enfant concerné a des parents désignés, seuls eux se partagent la dépense — un beau-parent
   // (ou toute autre personne) reste sélectionnable comme ayant payé, via « Payé par », sans faire
@@ -37,14 +119,7 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
     const child = childId ? state.children.find((c) => c.id === childId) : null;
     return (child && child.parent_ids.length) ? base.filter((id) => child.parent_ids.includes(id)) : base;
   };
-  const updateTotal = () => { total.textContent = `Total : ${Object.values(split).reduce((a, b) => a + b, 0)} %`; };
-  const drawSliders = (ids) => {
-    mount(sliders, ids.map((id) => h('div', { class: 'split-row' },
-      h('span', null, userName(id)),
-      h('input', { type: 'number', min: 0, max: 100, step: 1, value: split[id], oninput: (e) => { split[id] = Number(e.target.value); updateTotal(); } }),
-      h('span', null, '%'))));
-    updateTotal();
-  };
+  const drawSliders = (ids) => { mount(sliders, splitEditor(ids, split)); };
   const resetSplit = (initial = null) => {
     const ids = splitParticipants();
     let next = null;
@@ -52,7 +127,7 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
       next = Object.fromEntries(ids.filter((id) => initial[id] !== undefined).map((id) => [id, initial[id]]));
       if (Math.abs(Object.values(next).reduce((a, b) => a + b, 0) - 100) > 0.01) next = null;
     }
-    split = next || splitEqually(ids);
+    split = next || equalSplit(ids);
     drawSliders(ids);
   };
   const fillPayers = (selectedId) => {
@@ -92,13 +167,12 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
     ...((isNew || isRecurringEdit) ? [{ name: 'repeat_until', label: "Répéter jusqu'au (facultatif)", type: 'date', value: isRecurringEdit ? (recurring.repeat_until || '') : '' }] : []),
     ...(!isRecurringEdit ? [{ name: 'invoice', label: currentDoc ? 'Remplacer la facture (PDF, facultatif)' : 'Facture (PDF, facultatif)', type: 'file', accept: 'application/pdf', hint: "Retrouvable ensuite dans Documents, catégorie « Facture »." }] : []),
     ...(currentDoc ? [{ name: 'remove_invoice', label: 'Retirer la facture actuelle', type: 'checkbox', value: false }] : []),
-    { node: sliders, name: '_split_ui', get: () => null }, { node: total, name: '_split_total', get: () => null },
+    { node: sliders, name: '_split_ui', get: () => null },
   ];
 
   formModal(isRecurringEdit ? 'Modifier la dépense récurrente' : editing ? 'Modifier la dépense' : 'Nouvelle dépense', specs, {
     onSubmit: async (v, close) => {
-      const sum = Object.values(split).reduce((a, b) => a + b, 0);
-      if (Math.abs(sum - 100) > 0.01) throw new Error('La répartition doit totaliser 100 %.');
+      if (!isFull(split)) throw new Error('La répartition doit totaliser 100 %.'); // filet de sécurité : la barre garantit déjà 100 %
       const common = { title: v.title, amount_cents: Math.round(Number(v.amount) * 100), category: v.category, paid_by: v.paid_by, split, child_id: childId };
       if (isRecurringEdit) {
         await put(`/recurring-expenses/${recurring.id}`, { ...common, repeat_until: v.repeat_until || null });

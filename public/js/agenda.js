@@ -1,6 +1,9 @@
 import { h, icon, state, get, post, put, del, act, toast, modal, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, inFilter, today, ymd, addDays, toDate, fmtLong, fmtWhen, fmtDay, fmtMonth, timeOf, avatar, userById, childById, circleById, circleSelectOptions, activeCircleId, emptyState, readable, myCircles, mount, append, myEditableChildren, isoWeek, addressField, euro, userName, membersOfCircle, fmtDayY, field, maskFrTime } from './core.js';
 
 let cursor = null; // { y, m }
+// « Maintenant » au format des dates d'événements (AAAA-MM-JJTHH:MM) : sert à savoir si un rendez-vous
+// à prix est déjà passé, donc visible dans Budget (le serveur applique la même règle).
+const nowLocalStr = () => { const d = new Date(); return `${today()}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 let selected = today();
 
 const REPEATS = [opt('none', 'Ne se répète pas'), opt('daily', 'Tous les jours'), opt('weekly', 'Toutes les semaines'), opt('monthly', 'Tous les mois'), opt('yearly', 'Tous les ans')];
@@ -135,7 +138,7 @@ export function eventForm(ev, defaults = {}, done = () => {}) {
     { name: 'category', label: 'Catégorie', type: 'select', value: e.category || '', options: [opt('', 'Aucune'), ...EVENT_CATEGORIES.map((c) => opt(c, c))] },
     // Le prix crée (et tient à jour) une dépense dans Budget : seul le créateur de l'événement peut donc le saisir.
     ...(canEditPrice ? [{ name: 'price', label: 'Prix (€, facultatif)', type: 'number', step: '0.01', min: '0.01', value: e.price_cents ? (e.price_cents / 100).toFixed(2) : '',
-      hint: "Ajoute automatiquement une dépense dans Budget (vous en êtes le payeur, partagée entre les parents désignés de l'enfant s'il y en a, sinon tout le cercle) — modifiable ensuite depuis Budget. Indisponible pour un événement qui se répète : utilisez alors une dépense récurrente dans Budget." },
+      hint: "Ajoute automatiquement une dépense dans Budget une fois l'événement passé (vous en êtes le payeur, partagée entre les parents désignés de l'enfant s'il y en a, sinon tout le cercle) — modifiable ensuite depuis Budget. Indisponible pour un événement qui se répète : utilisez alors une dépense récurrente dans Budget." },
       { name: 'price_paid_by', node: h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Payé par (si un prix est indiqué)'), payerSelect), get: () => Number(payerSelect.value) }] : []),
     { name: 'notes', label: 'Notes', type: 'textarea', value: e.notes || '' },
   ];
@@ -191,7 +194,9 @@ export function openEvent(ev, reload) {
     circle && myCircles().length > 1 ? h('p', { class: 'muted' }, 'Cercle : ', circle.name) : null,
     ev.notes ? h('p', { class: 'notes' }, ev.notes) : null,
     ev.category ? h('p', null, h('span', { class: 'tag cat' }, ev.category)) : null,
-    ev.price_cents ? h('p', { class: 'row gap center' }, icon('euro', 14), ' Prix : ', h('strong', null, euro(ev.price_cents)), ev.price_paid_by ? h('span', { class: 'muted' }, `· payé par ${userName(ev.price_paid_by)}`) : null, h('a', { class: 'btn small', href: '#/budget', onclick: () => close() }, 'Voir dans Budget')) : null,
+    ev.price_cents ? h('p', { class: 'row gap center' }, icon('euro', 14), ' Prix : ', h('strong', null, euro(ev.price_cents)), ev.price_paid_by ? h('span', { class: 'muted' }, `· payé par ${userName(ev.price_paid_by)}`) : null, (ev.starts_at > nowLocalStr()
+      ? h('span', { class: 'muted' }, "· apparaîtra dans Budget après l'événement")
+      : h('a', { class: 'btn small', href: '#/budget', onclick: () => close() }, 'Voir dans Budget'))) : null,
     (ev.reminder_minutes !== null && ev.reminder_minutes !== undefined) ? h('p', { class: 'muted' }, icon('bell', 14), ' Rappel : ', (REMINDERS.find((r) => r.value === String(ev.reminder_minutes)) || {}).label || `${ev.reminder_minutes} min avant`) : null,
     h('div', { class: 'row gap wrap end' },
       h('button', { class: 'btn', type: 'button', onclick: () => { close(); sosForm(ev, reload); } }, icon('sos', 16), 'SOS remplacement'),
