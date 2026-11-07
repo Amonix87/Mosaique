@@ -24,6 +24,7 @@ const { db, DATA_DIR, MEDIA_DIR } = require('./db');
 const { loadHolidays, startAutoRefresh } = require('./holidays');
 const mailer = require('./mailer');
 const push = require('./push');
+const oidc = require('./oidc');
 const addonManager = require('./addon-manager');
 
 // Catégories utilisées à la fois pour la liste de courses et les ingrédients de recette, afin que
@@ -168,12 +169,12 @@ function parseCookies(req) {
   }
   return out;
 }
+const isSecureReq = (req) => req.secure || req.headers['x-forwarded-proto'] === 'https';
 function startSession(req, res, userId) {
   const token = randToken();
   const expires = Date.now() + 30 * 86400000;
   db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').run(sha(token), userId, expires);
-  const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-  res.setHeader('Set-Cookie', `mq_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 86400}${secure ? '; Secure' : ''}`);
+  res.append('Set-Cookie', `mq_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 86400}${isSecureReq(req) ? '; Secure' : ''}`);
 }
 function authenticate(req, _res, next) {
   const tok = parseCookies(req).mq_session;
@@ -253,7 +254,7 @@ function meState(u) {
 
 api.get('/state', (req, res) => {
   const n = db.prepare('SELECT COUNT(*) n FROM users').get().n;
-  res.json({ setup_needed: n === 0 });
+  res.json({ setup_needed: n === 0, oidc: oidc.publicInfo() });
 });
 
 api.post('/setup', (req, res) => {
@@ -275,6 +276,8 @@ api.post('/setup', (req, res) => {
 });
 
 api.post('/login', (req, res) => {
+  const oc = oidc.config();
+  if (oc && !oc.passwordLogin) throw new HttpError(403, `La connexion par mot de passe est désactivée : utilisez « Se connecter avec ${oc.name} ».`);
   rateLimit(req);
   const { email, password } = req.body || {};
   const u = db.prepare('SELECT * FROM users WHERE email=?').get(String(email || '').trim());
@@ -284,6 +287,54 @@ api.post('/login', (req, res) => {
   clearAttempts(req);
   startSession(req, res, u.id);
   res.json({ ok: true });
+});
+
+/* Connexion par OpenID Connect (Authelia...) — facultative, voir server/oidc.js et le README. Ces deux routes
+   sont publiques : l'utilisateur n'a pas encore de session. On n'accepte pas n'importe quelle identité : elle doit
+   correspondre à un compte Mosaïque existant (déjà lié, ou même e-mail) ; rien n'est créé automatiquement. */
+const OIDC_COOKIE = 'mq_oidc';
+const oidcCookie = (req, value, maxAge) => `${OIDC_COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/api/auth/oidc; Max-Age=${maxAge}${isSecureReq(req) ? '; Secure' : ''}`;
+function oidcRedirectUri(req) {
+  const c = oidc.config();
+  if (c.redirectUri) return c.redirectUri;
+  return `${appUrl.currentPublicUrl() || `${req.protocol}://${req.get('host')}`}/api/auth/oidc/callback`;
+}
+api.get('/auth/oidc/start', async (req, res) => {
+  if (!oidc.enabled()) throw new HttpError(404, 'Connexion OpenID Connect non configurée.');
+  try {
+    const { url, state } = await oidc.begin(oidcRedirectUri(req));
+    res.append('Set-Cookie', oidcCookie(req, state, 600));
+    res.redirect(url);
+  } catch (e) {
+    console.warn(`[oidc] début de connexion impossible : ${e.message}`);
+    res.redirect('/?oidc_error=provider');
+  }
+});
+api.get('/auth/oidc/callback', async (req, res) => {
+  const fail = (code, detail) => {
+    console.warn(`[oidc] connexion refusée (${code}) : ${detail}`);
+    res.append('Set-Cookie', oidcCookie(req, '', 0));
+    res.redirect(`/?oidc_error=${code}`);
+  };
+  if (!oidc.enabled()) return fail('disabled', 'OpenID Connect non configuré');
+  let who;
+  try { who = await oidc.finish(req.query, parseCookies(req)[OIDC_COOKIE]); }
+  catch (e) { return fail(e.code || 'provider', e.message); }
+
+  let u = db.prepare('SELECT * FROM users WHERE oidc_issuer=? AND oidc_sub=?').get(who.issuer, who.sub);
+  if (!u) {
+    // Première connexion de cette identité : on la rattache au compte qui a la même adresse e-mail, à condition
+    // que le fournisseur ne la déclare pas « non vérifiée » (c'est pourquoi il doit être un fournisseur de confiance).
+    if (!who.email) return fail('no_email', `identité ${who.sub} sans adresse e-mail (scope « email » demandé ?)`);
+    if (who.email_verified === false) return fail('unverified', `adresse ${who.email} non vérifiée par le fournisseur`);
+    u = db.prepare('SELECT * FROM users WHERE email=? AND claimed=1').get(who.email);
+    if (!u) return fail('unknown_user', `aucun compte Mosaïque pour ${who.email}`);
+    if (u.oidc_sub && u.oidc_issuer === who.issuer) return fail('linked_other', `le compte ${who.email} est déjà lié à une autre identité`);
+    db.prepare('UPDATE users SET oidc_issuer=?, oidc_sub=? WHERE id=?').run(who.issuer, who.sub, u.id);
+  }
+  startSession(req, res, u.id);
+  res.append('Set-Cookie', oidcCookie(req, '', 0));
+  res.redirect('/');
 });
 
 api.post('/logout', (req, res) => {

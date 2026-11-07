@@ -191,7 +191,7 @@ async function boot() {
   if (raw.startsWith('rejoindre/')) { await joinScreen(app, raw.split('/')[1], () => { location.hash = '#/accueil'; boot(); }); return; }
   const st = await get('/state').catch(() => ({ setup_needed: false }));
   if (st.setup_needed) { setupScreen(app, () => boot()); return; }
-  try { await loadState(); } catch { loginScreen(app, () => boot()); return; }
+  try { await loadState(); } catch { loginScreen(app, () => boot(), st.oidc); return; }
   connectStream();
   await router();
   startInstallPrompts(); // invitation à installer l'application / activer les notifications (mobile seulement)

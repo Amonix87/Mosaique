@@ -32,8 +32,33 @@ export function setupScreen(root, onDone) {
   mount(root, shell('Installez votre espace familial privé, hébergé ici même.', form));
 }
 
-export function loginScreen(root, onDone) {
+// Messages affichés quand la connexion par OpenID Connect (Authelia...) échoue : le serveur renvoie ici avec
+// « ?oidc_error=<code> » (voir /auth/oidc/callback dans server/index.js).
+const OIDC_ERRORS = {
+  unknown_user: "Votre identité est reconnue, mais aucun compte Mosaïque n'a cette adresse e-mail. Demandez une invitation à un administrateur de la famille.",
+  no_email: "Le service de connexion n'a pas transmis votre adresse e-mail. Un administrateur doit autoriser la portée « email » pour Mosaïque.",
+  unverified: "Votre adresse e-mail n'est pas vérifiée auprès du service de connexion.",
+  linked_other: 'Ce compte Mosaïque est déjà lié à une autre identité.',
+  expired: 'La connexion a expiré ou a déjà été utilisée. Réessayez.',
+  state: 'La connexion a été interrompue (navigateur différent ou cookies bloqués). Réessayez.',
+  denied: "Le service de connexion a refusé l'accès.",
+  disabled: "La connexion par ce service n'est pas activée.",
+  provider: "Le service de connexion est injoignable ou mal configuré. Voir les journaux du serveur.",
+  token: "Le service de connexion a renvoyé une réponse invalide. Voir les journaux du serveur.",
+};
+
+export function loginScreen(root, onDone, oidc) {
   const err = h('p', { class: 'form-error', role: 'alert' });
+  const code = new URLSearchParams(location.search).get('oidc_error');
+  if (code) {
+    err.textContent = OIDC_ERRORS[code] || 'La connexion a échoué.';
+    history.replaceState(null, '', location.pathname + location.hash); // l'erreur ne doit pas rester dans l'adresse
+  }
+  const ssoButton = oidc ? h('a', { class: 'btn block' + (oidc.password_login ? '' : ' primary'), href: '/api/auth/oidc/start' }, `Se connecter avec ${oidc.name}`) : null;
+  if (oidc && !oidc.password_login) {
+    mount(root, shell('Retrouvez votre agenda, votre budget et votre famille.', h('div', { class: 'stack' }, err, ssoButton)));
+    return;
+  }
   const form = h('form', { class: 'stack', onsubmit: async (e) => {
     e.preventDefault(); err.textContent = '';
     const f = e.target.elements;
@@ -44,7 +69,9 @@ export function loginScreen(root, onDone) {
   h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'E-mail'), h('input', { name: 'email', type: 'email', required: true, autocomplete: 'email', autofocus: true })),
   h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Mot de passe'), h('input', { name: 'password', type: 'password', required: true, autocomplete: 'current-password' })),
   err,
-  h('button', { class: 'btn primary block', type: 'submit' }, 'Se connecter'));
+  h('button', { class: 'btn primary block', type: 'submit' }, 'Se connecter'),
+  ssoButton ? h('p', { class: 'muted auth-or' }, 'ou') : null,
+  ssoButton);
   mount(root, shell('Retrouvez votre agenda, votre budget et votre famille.', form));
 }
 

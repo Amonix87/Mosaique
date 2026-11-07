@@ -452,6 +452,13 @@ if (!userCols.includes('app_installed_at')) {
 if (!userCols.includes('partner_id')) {
   db.exec('ALTER TABLE users ADD COLUMN partner_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
 }
+// Identité OpenID Connect liée au compte (Authelia, etc. — voir server/oidc.js) : émetteur + identifiant « sub »,
+// qui ne change jamais pour une même personne, contrairement à son e-mail.
+if (!userCols.includes('oidc_sub')) {
+  db.exec('ALTER TABLE users ADD COLUMN oidc_sub TEXT');
+  db.exec('ALTER TABLE users ADD COLUMN oidc_issuer TEXT');
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_issuer, oidc_sub) WHERE oidc_sub IS NOT NULL');
 if (!eventCols.includes('reminder_minutes')) {
   db.exec('ALTER TABLE events ADD COLUMN reminder_minutes INTEGER');
 }

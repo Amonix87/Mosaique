@@ -382,6 +382,7 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .auth-brand { display: flex; align-items: center; gap: .6rem; margin-bottom: .3rem; }
 .auth-brand h1 { margin: 0; }
 .auth-subtitle { color: var(--ink-soft); margin: 0 0 1.2rem; }
+.auth-or { text-align: center; margin: .2rem 0; }
 
 @media (prefers-reduced-motion: no-preference) {
   .day, .btn, .tile { transition: background-color .12s ease, border-color .12s ease; }

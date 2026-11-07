@@ -20,6 +20,7 @@ Application d'organisation familiale **auto-hébergée**, pensée pour les famil
 - Dates et heures toujours au format français (jj/mm/aaaa, 24h), quelle que soit la langue du navigateur
 - Installable comme une application sur le téléphone (icône sur l'écran d'accueil, plein écran)
 - Vraies notifications push, même application fermée
+- Connexion possible via **Authelia** (ou tout fournisseur OpenID Connect : Authentik, Keycloak…), en plus du mot de passe
 
 Tout tourne sur votre serveur : aucune donnée n'est envoyée à un tiers.
 
@@ -557,6 +558,54 @@ automation:
 ```
 
 Un capteur par enfant suffit ; répétez le bloc `binary_sensor` avec un nom différent pour chaque enfant à suivre. Le jeton étant personnel, chaque parent utilise le sien dans sa propre installation Home Assistant : `home` reflète alors automatiquement « chez moi », sans rien configurer de plus.
+
+## Connexion avec Authelia (OpenID Connect)
+
+Mosaïque peut déléguer la connexion à Authelia — ou à tout fournisseur OpenID Connect (Authentik, Keycloak, Zitadel…). Vous profitez alors de ce que votre fournisseur gère déjà : double authentification, annuaire LDAP (lldap, par exemple), passkeys, politique d'accès. C'est facultatif et sans effet tant que les variables ci-dessous ne sont pas définies ; le mot de passe continue de fonctionner à côté (sauf si vous le désactivez).
+
+**1. Déclarer Mosaïque dans Authelia** (exemple pour Authelia 4.39 — voir la documentation de votre version) :
+
+```yaml
+identity_providers:
+  oidc:
+    clients:
+      - client_id: mosaique
+        client_name: Mosaïque
+        client_secret: '$pbkdf2-sha512$...'   # empreinte générée avec : authelia crypto hash generate pbkdf2
+        public: false
+        authorization_policy: two_factor      # ou one_factor
+        redirect_uris:
+          - https://mosaique.exemple.fr/api/auth/oidc/callback
+        scopes: [openid, profile, email]
+        pkce_challenge_method: S256
+        token_endpoint_auth_method: client_secret_basic
+```
+
+L'adresse de retour (`redirect_uris`) est l'**adresse publique** de Mosaïque (réglage « Adresse publique » dans Réglages, ou `PUBLIC_URL`) suivie de `/api/auth/oidc/callback`. Si votre reverse proxy fait que Mosaïque ne voit pas cette adresse, forcez-la avec `OIDC_REDIRECT_URI`.
+
+**2. Renseigner Mosaïque** (variables d'environnement, voir `docker-compose.yml`) :
+
+| Variable | Rôle |
+|---|---|
+| `OIDC_ISSUER` | Adresse d'Authelia, ex. `https://auth.exemple.fr` (Mosaïque lit `/.well-known/openid-configuration`). Obligatoire. |
+| `OIDC_CLIENT_ID` | Identifiant du client déclaré dans Authelia (`mosaique` ci-dessus). Obligatoire. |
+| `OIDC_CLIENT_SECRET` | Le secret **en clair** (Authelia n'en garde que l'empreinte). |
+| `OIDC_NAME` | Libellé du bouton : « Se connecter avec *Authelia* » par défaut. |
+| `OIDC_SCOPES` | Portées demandées, `openid profile email` par défaut. |
+| `OIDC_REDIRECT_URI` | Adresse de retour, si elle ne peut pas être déduite de l'adresse publique. |
+| `OIDC_PASSWORD_LOGIN` | `0` pour masquer le mot de passe : seul le bouton reste. À n'activer qu'une fois la connexion Authelia vérifiée. |
+
+Un bouton **Se connecter avec Authelia** apparaît alors sur l'écran de connexion.
+
+**Quel compte Mosaïque ?** Aucun compte n'est créé automatiquement : la personne doit déjà exister dans Mosaïque (invitation activée). À la première connexion, son identité Authelia est rattachée au compte qui a **la même adresse e-mail** ; ensuite Mosaïque la reconnaît par son identifiant Authelia, même si elle change d'adresse. Une adresse que le fournisseur déclare non vérifiée est refusée, et un compte déjà lié à une identité ne peut pas être repris par une autre. Comme le rattachement se fait par e-mail, n'utilisez que des fournisseurs qui contrôlent les adresses de leurs utilisateurs (c'est le cas d'Authelia : c'est vous qui tenez l'annuaire).
+
+Pour l'inviter : créez d'abord la personne dans Mosaïque (Famille → « Ajouter un membre ») et faites-lui activer son compte comme d'habitude (le mot de passe choisi à cette occasion reste utilisable, ou sera ignoré si `OIDC_PASSWORD_LOGIN=0`), puis elle utilise le bouton Authelia avec la même adresse.
+
+Notes :
+- Se déconnecter de Mosaïque ne ferme pas la session Authelia (déconnexion locale seulement) : un nouveau clic sur le bouton vous reconnecte aussitôt, comme pour tout service branché en SSO.
+- Les refus sont expliqués à l'écran de connexion, et le détail technique (compte inconnu, adresse non vérifiée, fournisseur injoignable…) est écrit dans les journaux du serveur (`docker compose logs mosaique`, lignes `[oidc]`).
+- Mosaïque refuse un fournisseur en `http://` (hors machine locale) : l'échange se fait en HTTPS.
+- La connexion par Authelia contourne la limite de tentatives du mot de passe : c'est Authelia qui protège l'accès (régulation, 2FA).
 
 ## Licence
 

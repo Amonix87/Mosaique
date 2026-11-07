@@ -41,6 +41,17 @@ services:
       # Adresse publique de votre instance, utilisée pour les liens dans les e-mails.
       # - PUBLIC_URL=https://monfamille.exemple.fr
 
+      # --- Connexion avec Authelia / un fournisseur OpenID Connect (facultatif) ---
+      # Ajoute un bouton « Se connecter avec Authelia » sur l'écran de connexion. Voir le README
+      # (section « Connexion avec Authelia ») pour la configuration côté Authelia.
+      # - OIDC_ISSUER=https://auth.exemple.fr
+      # - OIDC_CLIENT_ID=mosaique
+      # - OIDC_CLIENT_SECRET=le-secret-en-clair-declare-dans-authelia
+      # Libellé du bouton (« Se connecter avec … ») :
+      # - OIDC_NAME=Authelia
+      # OIDC_PASSWORD_LOGIN=0 masque le mot de passe : seule la connexion par le fournisseur reste possible.
+      # - OIDC_PASSWORD_LOGIN=1
+
 volumes:
   mosaique-data:
   mosaique-media:

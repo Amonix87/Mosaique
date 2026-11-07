@@ -261,12 +261,64 @@ function testEportailHistoryParsing() {
   console.log("✔ Analyse de l'historique des réservations e-portail (demandes/détail, créneaux ouverts) vérifiée");
 }
 
+// Faux fournisseur OpenID Connect (type Authelia) : évite de dépendre d'un vrai service pour tester la connexion
+// OIDC. Il ne simule pas l'écran de connexion du fournisseur : le test fabrique lui-même le « code » qu'un
+// utilisateur authentifié rapporterait (voir idp.issue), puis le serveur de Mosaïque fait tout le reste pour de
+// vrai — échange du code (secret, PKCE), contrôle du jeton, lecture de userinfo.
+const idp = { clientId: 'mosaique-test', secret: 'secret-de-test', codes: new Map(), tokens: new Map(), issuer: '' };
+const jwt = (claims) => ['{"alg":"none"}', JSON.stringify(claims)].map((x) => Buffer.from(x).toString('base64url')).join('.') + '.sig';
+idp.issue = (identity, authorizeUrl) => {
+  const code = crypto.randomBytes(8).toString('hex');
+  idp.codes.set(code, { identity, nonce: authorizeUrl.searchParams.get('nonce'), challenge: authorizeUrl.searchParams.get('code_challenge'), redirectUri: authorizeUrl.searchParams.get('redirect_uri') });
+  return code;
+};
+const fakeIdp = http.createServer((req, res) => {
+  const json = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+  const url = new URL(req.url, idp.issuer);
+  if (url.pathname === '/.well-known/openid-configuration') {
+    return json(200, { issuer: idp.issuer, authorization_endpoint: `${idp.issuer}/authorize`, token_endpoint: `${idp.issuer}/token`, userinfo_endpoint: `${idp.issuer}/userinfo`, token_endpoint_auth_methods_supported: ['client_secret_basic'] });
+  }
+  if (url.pathname === '/token' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const f = new URLSearchParams(raw);
+      const basic = Buffer.from(String(req.headers.authorization || '').replace(/^Basic /, ''), 'base64').toString();
+      if (basic !== `${idp.clientId}:${idp.secret}`) return json(401, { error: 'invalid_client' });
+      const entry = idp.codes.get(f.get('code'));
+      idp.codes.delete(f.get('code')); // à usage unique
+      if (!entry) return json(400, { error: 'invalid_grant' });
+      if (crypto.createHash('sha256').update(String(f.get('code_verifier'))).digest('base64url') !== entry.challenge) return json(400, { error: 'invalid_grant', error_description: 'PKCE' });
+      if (f.get('redirect_uri') !== entry.redirectUri) return json(400, { error: 'invalid_grant', error_description: 'redirect_uri' });
+      const id = entry.identity;
+      const at = 'at-' + crypto.randomBytes(6).toString('hex');
+      idp.tokens.set(at, id);
+      const now = Math.floor(Date.now() / 1000);
+      // L'identité de Authelia est dans userinfo : le jeton d'identité ne porte que l'essentiel.
+      json(200, { token_type: 'Bearer', access_token: at, id_token: jwt({ iss: idp.issuer, aud: id.aud || idp.clientId, sub: id.sub, nonce: id.nonce || entry.nonce, iat: now, exp: now + 300 }) });
+    });
+    return;
+  }
+  if (url.pathname === '/userinfo') {
+    const id = idp.tokens.get(String(req.headers.authorization || '').replace(/^Bearer /, ''));
+    if (!id) return json(401, { error: 'invalid_token' });
+    const out = { sub: id.userinfoSub || id.sub };
+    if (id.email !== undefined) out.email = id.email;
+    if (id.email_verified !== undefined) out.email_verified = id.email_verified;
+    if (id.name) out.name = id.name;
+    return json(200, out);
+  }
+  json(404, { error: 'not_found' });
+});
+
 async function main() {
   const smtpPort = await new Promise((resolve) => fakeSmtp.listen(0, '127.0.0.1', () => resolve(fakeSmtp.server.address().port)));
   const nominatimPort = await new Promise((resolve) => fakeNominatim.listen(0, '127.0.0.1', () => resolve(fakeNominatim.address().port)));
   const pushPort = await new Promise((resolve) => fakePushService.listen(0, '127.0.0.1', () => resolve(fakePushService.address().port)));
+  const idpPort = await new Promise((resolve) => fakeIdp.listen(0, '127.0.0.1', () => resolve(fakeIdp.address().port)));
+  idp.issuer = `http://127.0.0.1:${idpPort}`;
   const srv = spawn('node', [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT, DATA_DIR: dir, SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtpPort), SMTP_FROM: 'Mosaïque <test@mosaique.local>', PUBLIC_URL: 'https://famille.test', NOMINATIM_URL: `http://127.0.0.1:${nominatimPort}/search`, NODE_TLS_REJECT_UNAUTHORIZED: '0' },
+    env: { ...process.env, PORT, DATA_DIR: dir, SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtpPort), SMTP_FROM: 'Mosaïque <test@mosaique.local>', PUBLIC_URL: 'https://famille.test', OIDC_ISSUER: idp.issuer, OIDC_CLIENT_ID: idp.clientId, OIDC_CLIENT_SECRET: idp.secret, NOMINATIM_URL: `http://127.0.0.1:${nominatimPort}/search`, NODE_TLS_REJECT_UNAUTHORIZED: '0' },
     stdio: 'inherit',
   });
   try {
@@ -331,6 +383,81 @@ async function main() {
     ok(await again.post('/api/login', { email: 'ALICE@ex.fr', password: 'motdepasse1' }), 200, 'login insensible à la casse');
     ok(await again.post('/api/logout'));
     ok(await again.get('/api/me'), 401, 'session détruite');
+
+    // ── Connexion par OpenID Connect (Authelia...) ──
+    assert.deepStrictEqual((await anon.get('/api/state')).body.oidc, { name: 'Authelia', password_login: true }, "l'écran de connexion sait qu'OIDC est disponible");
+    const cookieOf = (res, name) => (res.headers.getSetCookie().find((c) => c.startsWith(`${name}=`)) || '').split(';')[0];
+    const oidcLogin = async (identity, { sendCookie = true, extra = {} } = {}) => {
+      const st = await fetch(BASE + '/api/auth/oidc/start', { redirect: 'manual' });
+      assert.strictEqual(st.status, 302, 'start redirige vers le fournisseur');
+      const loc = new URL(st.headers.get('location'));
+      const state = loc.searchParams.get('state');
+      const q = new URLSearchParams({ code: idp.issue(identity, loc), state, ...extra });
+      const cb = await fetch(`${BASE}/api/auth/oidc/callback?${q}`, { redirect: 'manual', headers: sendCookie ? { cookie: cookieOf(st, 'mq_oidc') } : {} });
+      return { status: cb.status, location: cb.headers.get('location'), session: cookieOf(cb, 'mq_session'), start: { loc, state, cookie: cookieOf(st, 'mq_oidc') } };
+    };
+    const asUser = async (session) => (await fetch(BASE + '/api/me', { headers: { cookie: session } })).json();
+
+    const st0 = await fetch(BASE + '/api/auth/oidc/start', { redirect: 'manual' });
+    const authUrl = new URL(st0.headers.get('location'));
+    assert.ok(authUrl.href.startsWith(`${idp.issuer}/authorize?`), 'redirige vers le point d\'autorisation découvert');
+    assert.deepStrictEqual([authUrl.searchParams.get('response_type'), authUrl.searchParams.get('client_id'), authUrl.searchParams.get('scope'), authUrl.searchParams.get('code_challenge_method')], ['code', idp.clientId, 'openid profile email', 'S256']);
+    assert.strictEqual(authUrl.searchParams.get('redirect_uri'), 'https://famille.test/api/auth/oidc/callback', "l'adresse de retour vient de l'adresse publique réglée");
+    assert.ok(cookieOf(st0, 'mq_oidc').length > 20 && /HttpOnly/.test(st0.headers.getSetCookie().join(';')), "un cookie lie le retour à ce navigateur");
+
+    // Première connexion : rattachement par e-mail au compte existant (ici Alice).
+    let oi = await oidcLogin({ sub: 'sub-alice', email: 'Alice@ex.fr', email_verified: true, name: 'Alice' });
+    assert.deepStrictEqual([oi.status, oi.location], [302, '/'], 'connexion réussie');
+    assert.ok(oi.session.startsWith('mq_session='), 'une session est ouverte');
+    assert.strictEqual((await asUser(oi.session)).user.email, 'alice@ex.fr', "c'est bien le compte d'Alice");
+    // Ensuite c'est le « sub » qui compte, plus l'e-mail : Alice peut changer d'adresse chez le fournisseur.
+    oi = await oidcLogin({ sub: 'sub-alice', email: 'alice.autre@ex.fr', email_verified: true });
+    assert.strictEqual((await asUser(oi.session)).user.id, A, 'reconnue par son identifiant, même avec une autre adresse');
+    // Refus : aucun compte, adresse non vérifiée, adresse absente — jamais de session ni de création de compte.
+    for (const [identity, code] of [
+      [{ sub: 'sub-x', email: 'inconnu@ex.fr', email_verified: true }, 'unknown_user'],
+      [{ sub: 'sub-y', email: 'bob@ex.fr', email_verified: false }, 'unverified'],
+      [{ sub: 'sub-z' }, 'no_email'],
+    ]) {
+      oi = await oidcLogin(identity);
+      assert.deepStrictEqual([oi.status, oi.location, oi.session], [302, `/?oidc_error=${code}`, ''], code);
+    }
+    // Un compte déjà lié à une identité ne se laisse pas « reprendre » par une autre qui aurait la même adresse.
+    oi = await oidcLogin({ sub: 'sub-bob', email: 'bob@ex.fr', email_verified: true });
+    assert.strictEqual((await asUser(oi.session)).user.id, B, 'Bob se lie à sa première connexion');
+    oi = await oidcLogin({ sub: 'sub-intrus', email: 'bob@ex.fr', email_verified: true });
+    assert.deepStrictEqual([oi.location, oi.session], ['/?oidc_error=linked_other', ''], 'une autre identité avec la même adresse est refusée');
+    // Garde-fous du protocole.
+    oi = await oidcLogin({ sub: 'sub-alice', email: 'alice@ex.fr', email_verified: true }, { sendCookie: false });
+    assert.deepStrictEqual([oi.location, oi.session], ['/?oidc_error=state', ''], 'sans le cookie du navigateur d\'origine : refusé');
+    const replay = await fetch(`${BASE}/api/auth/oidc/callback?code=x&state=${oi.start.state}`, { redirect: 'manual', headers: { cookie: oi.start.cookie } });
+    assert.strictEqual(replay.headers.get('location'), '/?oidc_error=expired', 'un « state » ne sert qu\'une fois');
+    oi = await oidcLogin({ sub: 'sub-alice', email: 'alice@ex.fr', email_verified: true, nonce: 'autre' });
+    assert.deepStrictEqual([oi.location, oi.session], ['/?oidc_error=token', ''], 'nonce incorrect refusé');
+    oi = await oidcLogin({ sub: 'sub-alice', email: 'alice@ex.fr', email_verified: true, aud: 'une-autre-appli' });
+    assert.deepStrictEqual([oi.location, oi.session], ['/?oidc_error=token', ''], "jeton destiné à une autre application refusé");
+    oi = await oidcLogin({ sub: 'sub-alice', userinfoSub: 'sub-autre', email: 'alice@ex.fr', email_verified: true });
+    assert.deepStrictEqual([oi.location, oi.session], ['/?oidc_error=token', ''], 'userinfo d\'une autre personne refusé');
+    oi = await oidcLogin({ sub: 'sub-alice', email: 'alice@ex.fr', email_verified: true }, { extra: { error: 'access_denied' } });
+    assert.deepStrictEqual([oi.location, oi.session], ['/?oidc_error=denied', ''], 'refus côté fournisseur');
+    ok(await new Client().get('/api/me'), 401, 'aucun de ces refus n\'a ouvert de session');
+
+    // Configuration (fonctions pures de server/oidc.js)
+    const oidcMod = require('../server/oidc.js');
+    const saved = { ...process.env };
+    try {
+      delete process.env.OIDC_ISSUER; delete process.env.OIDC_CLIENT_ID;
+      assert.strictEqual(oidcMod.enabled(), false, 'sans configuration : désactivé');
+      assert.strictEqual(oidcMod.publicInfo(), null);
+      Object.assign(process.env, { OIDC_ISSUER: 'https://auth.exemple.fr/', OIDC_CLIENT_ID: 'x', OIDC_NAME: 'Mon SSO', OIDC_PASSWORD_LOGIN: 'false' });
+      assert.deepStrictEqual(oidcMod.publicInfo(), { name: 'Mon SSO', password_login: false });
+      assert.strictEqual(oidcMod.config().issuer, 'https://auth.exemple.fr', 'barre finale retirée');
+      process.env.OIDC_ISSUER = 'http://127.0.0.1:1'; // personne n'écoute : connexion refusée tout de suite
+      await assert.rejects(() => oidcMod.begin('https://x/cb'), (e) => e.code === 'provider', 'fournisseur injoignable : erreur « provider »');
+      process.env.OIDC_ISSUER = 'http://auth.exemple.fr';
+      await assert.rejects(() => oidcMod.begin('https://x/cb'), /https/, 'un fournisseur en http:// (hors machine locale) est refusé');
+    } finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
+    console.log('✔ Connexion OpenID Connect vérifiée');
 
     // Enfants
     const kid1 = (await alice.post('/api/children', { name: 'Léo', color: '#17BEBB' })).body.id;
@@ -1375,6 +1502,7 @@ async function main() {
     fakeSmtp.close();
     fakeNominatim.close();
     fakePushService.close();
+    fakeIdp.close();
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(certDir, { recursive: true, force: true });
   }
