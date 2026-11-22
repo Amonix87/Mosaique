@@ -2542,7 +2542,8 @@ function attachInvoiceFile(invoiceId, item) {
   if (!inv || !inv.circle_id || inv.document_id) return;
   const stored = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(UPLOAD_DIR, stored), data);
-  const filename = fixName(`${inv.number}.pdf`);
+  // Nom propre (pas fixName : il sert à réparer les noms envoyés par un navigateur, et abîmerait les accents d'un nom déjà en UTF-8).
+  const filename = `${inv.number}.pdf`.replace(/[\\/\r\n"]/g, '_').slice(0, 200);
   try {
     db.transaction(() => {
       const doc = db.prepare('INSERT INTO documents(circle_id,title,category,filename,stored_name,mime,size,created_by) VALUES(?,?,?,?,?,?,?,NULL)')

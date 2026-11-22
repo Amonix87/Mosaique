@@ -1461,6 +1461,10 @@ async function main() {
     assert.ok(pdfInv.document_id, 'le PDF reçu est rangé et rattaché à la facture');
     const pdfDoc = (await bob.get('/api/documents')).body.find((d) => d.id === pdfInv.document_id);
     assert.ok(pdfDoc && pdfDoc.category === 'Facture' && pdfDoc.mime === 'application/pdf', 'il apparaît dans Documents, catégorie Facture');
+    const accentBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Périscolaire', number: 'Périsco-é1', date: '2027-01-07', amount: 7, circle_id: circle, external_id: 'eportail-pdf-accent', file_base64: pdfB64 });
+    const accentDoc = (await bob.get('/api/documents')).body.find((d) => d.title.includes('Périsco-é1'));
+    assert.strictEqual(accentDoc.filename, 'Périsco-é1.pdf', 'le nom du fichier garde ses accents');
+    await bob.del(`/api/invoices/${accentBatch.body.results[0].id}`);
     const notPdf = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Pas un PDF', number: 'F-PDF-2', date: '2027-01-06', amount: 5, circle_id: circle, external_id: 'eportail-pdf2', file_base64: Buffer.from('<html>pas un pdf</html>').toString('base64') });
     assert.strictEqual(notPdf.body.results[0].ok, true, 'un fichier qui n\'est pas un PDF ne fait pas échouer la facture');
     assert.strictEqual((await bob.get('/api/invoices')).body.find((i) => i.id === notPdf.body.results[0].id).document_id, null, 'mais il est ignoré');
