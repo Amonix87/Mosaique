@@ -603,6 +603,12 @@ if (invoiceCols2.find((c) => c.name === 'circle_id')?.notnull) {
     CREATE INDEX IF NOT EXISTS idx_invoices_circle_date ON invoices(circle_id, date);
   `);
 }
+// PDF de la facture, téléchargé depuis le portail par l'addon (voir fetchInvoiceFile dans
+// server/addons/eportail.js) et rangé dans Documents. Si le document disparaît, la facture reste.
+if (!db.prepare('PRAGMA table_info(invoices)').all().some((c) => c.name === 'document_id')) {
+  db.exec('ALTER TABLE invoices ADD COLUMN document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL');
+}
+
 // Créneaux « ouverts » (visibles sur le planning, réservés ou pas) déjà aperçus au moins une fois,
 // par enfant — permet de détecter RÉELLEMENT le moment où les vacances deviennent réservables : avant
 // ouverture, le portail n'affiche RIEN pour ces dates (ni créneau réservé, ni "non réservé" — voir

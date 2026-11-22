@@ -31,6 +31,11 @@ module.exports = {
     // réelle du moment où une période (vacances/ALSH) devient réservable : voir extractOpenSlots et
     // maybeSendHolidayNotices dans server/index.js. N'a de sens que si votre portail distingue, pour
     // un même créneau, « pas encore visible » (absence totale) de « visible, pas encore réservé ».
+    // Second argument facultatif : { needsInvoiceFile(facture) } dit si le PDF de cette facture manque
+    // encore dans Mosaïque. Un addon qui sait télécharger les PDF le fait pour celles-là seulement et
+    // joint le contenu à la facture (Buffer dans `file_data`) : Mosaïque le range dans Documents et le
+    // rattache à la dépense (seul un vrai PDF, 25 Mo au plus, est retenu ; voir fetchInvoiceFile dans
+    // eportail.js — ne jamais envoyer les cookies de session à un autre site que le portail).
     return { reservations: [], invoices: [], openSlots: [] };
   },
 

@@ -365,6 +365,7 @@ export async function budget(root) {
           h('div', { class: 'expense-main' }, h('strong', null, inv.label, ` — ${inv.number}`),
             h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '', child ? ` · ${child.name}` : '', ' · ', assignee ? `à payer par ${assignee}` : 'non attribuée')),
           h('strong', null, euro(inv.amount_cents)),
+          inv.document_id ? h('a', { class: 'icon-btn', href: `/api/documents/${inv.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture', title: 'Voir la facture (PDF)' }, icon('doc', 16)) : null,
           assignee ? h('button', { class: 'btn small', onclick: () => act(async () => {
             await put(`/invoices/${inv.id}/assign`, { assigned_to: inv.assigned_to, paid: true, date: today() });
             toast('Facture marquée payée'); load();

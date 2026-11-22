@@ -20,21 +20,30 @@ const DAYS_AFTER = 45;
    virgules), alors que le module http de Node les expose déjà sous forme de tableau. */
 function makeClient() {
   const jar = new Map();
+  let portalHost = null; // les cookies de session ne vont qu'au portail, jamais à un autre site (voir plus bas)
   const cookieHeader = () => [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
   function storeCookies(headers) {
     const raw = headers['set-cookie'];
     if (!raw) return;
     for (const line of raw) { const m = /^([^=]+)=([^;]*)/.exec(line); if (m) jar.set(m[1], m[2]); }
   }
-  function rawRequest(url, { method = 'GET', headers = {}, body } = {}) {
+  // asBuffer : corps brut (téléchargement d'un PDF) au lieu d'un texte ; maxBytes coupe un envoi trop gros.
+  function rawRequest(url, { method = 'GET', headers = {}, body, asBuffer = false, maxBytes = 0 } = {}) {
     return new Promise((resolve, reject) => {
       const u = new URL(url);
+      if (!portalHost) portalHost = u.host;
+      const sameHost = u.host === portalHost;
       const lib = u.protocol === 'https:' ? https : http;
-      const req = lib.request(u, { method, headers: { Cookie: cookieHeader(), ...headers } }, (res) => {
-        storeCookies(res.headers);
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+      const req = lib.request(u, { method, headers: { ...(sameHost ? { Cookie: cookieHeader() } : {}), ...headers } }, (res) => {
+        if (sameHost) storeCookies(res.headers);
+        const chunks = []; let size = 0;
+        res.on('data', (c) => {
+          size += c.length;
+          if (maxBytes && size > maxBytes) { req.destroy(new Error('Réponse trop volumineuse.')); return; }
+          chunks.push(c);
+        });
+        res.on('end', () => { const buf = Buffer.concat(chunks); resolve({ status: res.statusCode, headers: res.headers, body: asBuffer ? buf : buf.toString('utf8') }); });
+        res.on('error', reject);
       });
       req.on('error', reject);
       if (body) req.write(body);
@@ -43,8 +52,11 @@ function makeClient() {
   }
   async function request(url, opts = {}, redirects = 0) {
     const res = await rawRequest(url, opts);
-    if ([301, 302, 303].includes(res.status) && res.headers.location && redirects < 6) {
-      return request(new URL(res.headers.location, url).toString(), { method: 'GET' }, redirects + 1);
+    if ([301, 302, 303, 307, 308].includes(res.status) && res.headers.location && redirects < 6) {
+      const next = new URL(res.headers.location, url);
+      // Jamais de repli vers http:// en cours de route (le PDF d'une facture transiterait en clair).
+      if (new URL(url).protocol === 'https:' && next.protocol !== 'https:') throw new Error('Redirection non sécurisée refusée.');
+      return request(next.toString(), { method: 'GET', asBuffer: opts.asBuffer, maxBytes: opts.maxBytes }, redirects + 1);
     }
     return res;
   }
@@ -225,7 +237,13 @@ async function fetchInvoices(client, baseUrl, circleId) {
     for (const tr of rows) {
       const cells = $(tr).find('td').map((_, td) => $(td).text().trim()).get();
       if (!cells.length) continue;
+      // Lien « Voir/Télécharger » de la ligne : /espace_facturation/downloadFacture?idfact=… (redirige
+      // vers un stockage externe qui sert le PDF — voir fetchInvoiceFile).
+      const href = $(tr).find('a[href*="downloadFacture"]').first().attr('href');
+      let downloadUrl = null;
+      try { downloadUrl = href ? new URL(href, url).toString() : null; } catch { downloadUrl = null; }
       items.push({
+        download_url: downloadUrl,
         label: 'Facture périscolaire',
         number: idx.number >= 0 ? cells[idx.number] : '',
         date: idx.date >= 0 ? parseFrDate(cells[idx.date]) : null,
@@ -239,6 +257,18 @@ async function fetchInvoices(client, baseUrl, circleId) {
     }
   }
   return items;
+}
+
+const INVOICE_MAX_BYTES = 25 * 1024 * 1024;
+const MAX_INVOICE_DOWNLOADS = 15; // par synchronisation : le reste suit à la suivante, sans surcharger le portail
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Télécharge le PDF d'une facture avec la session ouverte. Le lien du portail redirige vers un stockage
+// externe (adresse signée) : les cookies de session ne lui sont pas envoyés. On vérifie que c'est bien
+// un PDF (en-tête %PDF-) ; sinon on renvoie null — une facture sans PDF reste utilisable, on réessaiera.
+async function fetchInvoiceFile(client, downloadUrl) {
+  const res = await client.request(downloadUrl, { asBuffer: true, maxBytes: INVOICE_MAX_BYTES });
+  if (res.status !== 200 || !Buffer.isBuffer(res.body) || res.body.slice(0, 5).toString() !== '%PDF-') return null;
+  return res.body;
 }
 
 /* ───────────────────────── Historique profond des réservations ─────────────────────────
@@ -362,7 +392,9 @@ module.exports = {
     { key: 'password', label: 'Mot de passe', type: 'password' },
     { key: 'circle', label: 'Cercle pour les factures (facultatif si un seul cercle)', type: 'circle' },
   ],
-  async sync(config) {
+  // ctx.needsInvoiceFile(facture) (fourni par Mosaïque, facultatif) : dit si le PDF de cette facture
+  // manque encore, pour ne télécharger que ce qu'on n'a pas déjà.
+  async sync(config, ctx = {}) {
     const baseUrl = String(config.url || '').trim().replace(/\/+$/, '');
     if (!baseUrl || !config.username || !config.password) {
       throw new Error('Adresse du portail, identifiant et mot de passe requis.');
@@ -374,6 +406,20 @@ module.exports = {
       .filter((r) => r.child && r.date && withinWindow(r.date));
     const openSlots = extractOpenSlots(rawEvents);
     const invoices = (await fetchInvoices(client, baseUrl, config.circle)).filter((i) => i.date && i.number && i.amount != null);
+    if (typeof ctx.needsInvoiceFile === 'function') {
+      let done = 0;
+      for (const inv of invoices) {
+        if (done >= MAX_INVOICE_DOWNLOADS) break;
+        if (!inv.download_url || !ctx.needsInvoiceFile(inv)) continue;
+        done++;
+        try {
+          const data = await fetchInvoiceFile(client, inv.download_url);
+          if (data) inv.file_data = data;
+          else console.warn(`[e-portail] facture ${inv.number} : le lien n'a pas renvoyé de PDF`);
+        } catch (e) { console.warn(`[e-portail] facture ${inv.number} : téléchargement impossible (${e.message})`); }
+        await sleep(500);
+      }
+    }
     // Fenêtre couverte par cette synchronisation : permet au serveur de supprimer les réservations
     // devenues obsolètes (annulées depuis, ou — avant la correction du filtre ci-dessus —
     // importées par erreur alors qu'elles n'étaient en fait pas réservées).
@@ -386,4 +432,6 @@ module.exports = {
   _parseDemandeDetail: parseDemandeDetail,
   _childGivenNameFromLegend: childGivenNameFromLegend,
   _extractOpenSlots: extractOpenSlots,
+  _makeClient: makeClient,
+  _fetchInvoiceFile: fetchInvoiceFile,
 };

@@ -1424,6 +1424,53 @@ async function main() {
     assert.strictEqual(revived.expense_id, null, 'supprimer la dépense redonne automatiquement la facture en attente');
     assert.strictEqual(revived.assigned_to, C, 'toujours attribuée à Carla, juste de nouveau non payée');
 
+    // Téléchargement du PDF depuis le portail : le lien redirige vers un stockage externe, qui ne doit
+    // JAMAIS recevoir le cookie de session du portail ; le contenu n'est accepté que s'il s'agit d'un PDF.
+    {
+      const eportailMod = require('../server/addons/eportail.js');
+      let storageCookie = 'jamais appelé';
+      const storage = http.createServer((q, r) => { storageCookie = q.headers.cookie || ''; r.setHeader('Content-Type', 'application/pdf'); r.end(q.url.includes('html') ? '<html>non</html>' : '%PDF-1.4 test'); });
+      await new Promise((r) => storage.listen(0, '127.0.0.1', r));
+      const stPort = storage.address().port;
+      const portal = http.createServer((q, r) => {
+        if (q.url === '/login') { r.setHeader('Set-Cookie', 'JSESSIONID=secret; Path=/'); r.end('ok'); return; }
+        r.statusCode = 302; r.setHeader('Location', `http://localhost:${stPort}/${q.url.includes('bad') ? 'html' : 'f.pdf'}?sig=1`); r.end();
+      });
+      await new Promise((r) => portal.listen(0, '127.0.0.1', r));
+      const pPort = portal.address().port;
+      const cl = eportailMod._makeClient();
+      await cl.request(`http://127.0.0.1:${pPort}/login`);
+      const pdfBuf = await eportailMod._fetchInvoiceFile(cl, `http://127.0.0.1:${pPort}/downloadFacture?idfact=1`);
+      assert.ok(pdfBuf && pdfBuf.slice(0, 5).toString() === '%PDF-', 'le PDF est récupéré à travers la redirection');
+      assert.strictEqual(storageCookie, '', 'le cookie de session du portail n\'est pas envoyé au stockage externe');
+      assert.strictEqual(await eportailMod._fetchInvoiceFile(cl, `http://127.0.0.1:${pPort}/downloadFacture?bad=1`), null, 'un contenu qui n\'est pas un PDF est refusé');
+      storage.close(); portal.close();
+    }
+    // PDF de la facture (téléchargé par l'addon, ou envoyé en file_base64 par un script) : rangé dans
+    // Documents, visible depuis la facture en attente, rattaché à la dépense au paiement, et conservé
+    // si on supprime la dépense (il appartient à la facture).
+    const pdfB64 = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n').toString('base64');
+    const pdfBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine janvier', number: 'F-PDF-1', date: '2027-01-05', amount: 20, circle_id: circle, external_id: 'eportail-pdf1', file_base64: pdfB64 });
+    const pdfInvId = pdfBatch.body.results[0].id;
+    const pdfInv = (await bob.get('/api/invoices')).body.find((i) => i.id === pdfInvId);
+    assert.ok(pdfInv.document_id, 'le PDF reçu est rangé et rattaché à la facture');
+    const pdfDoc = (await bob.get('/api/documents')).body.find((d) => d.id === pdfInv.document_id);
+    assert.ok(pdfDoc && pdfDoc.category === 'Facture' && pdfDoc.mime === 'application/pdf', 'il apparaît dans Documents, catégorie Facture');
+    const notPdf = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Pas un PDF', number: 'F-PDF-2', date: '2027-01-06', amount: 5, circle_id: circle, external_id: 'eportail-pdf2', file_base64: Buffer.from('<html>pas un pdf</html>').toString('base64') });
+    assert.strictEqual(notPdf.body.results[0].ok, true, 'un fichier qui n\'est pas un PDF ne fait pas échouer la facture');
+    assert.strictEqual((await bob.get('/api/invoices')).body.find((i) => i.id === notPdf.body.results[0].id).document_id, null, 'mais il est ignoré');
+    await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine janvier', number: 'F-PDF-1', date: '2027-01-05', amount: 20, circle_id: circle, external_id: 'eportail-pdf1', file_base64: pdfB64 });
+    assert.strictEqual((await bob.get('/api/documents')).body.filter((d) => d.title.includes('F-PDF-1')).length, 1, 'une nouvelle synchronisation ne range pas le PDF une seconde fois');
+    const pdfPaid = (await bob.put(`/api/invoices/${pdfInvId}/assign`, { assigned_to: B, paid: true, date: '2027-01-06' })).body;
+    const pdfExp = (await bob.get('/api/expenses')).body.find((e) => e.id === pdfPaid.expense_id);
+    assert.strictEqual(pdfExp.document_id, pdfInv.document_id, 'marquée payée, la dépense créée porte le PDF (lien « Voir la facture » dans Budget)');
+    ok(await bob.del(`/api/expenses/${pdfExp.id}/invoice`), 200, 'détacher le PDF de la dépense');
+    assert.ok((await bob.get('/api/documents')).body.some((d) => d.id === pdfInv.document_id), 'le PDF reste dans Documents (il appartient à la facture)');
+    ok(await bob.del(`/api/expenses/${pdfExp.id}`), 200, 'supprimer la dépense');
+    assert.ok((await bob.get('/api/documents')).body.some((d) => d.id === pdfInv.document_id), 'supprimer la dépense ne supprime pas non plus le PDF');
+    ok(await bob.del(`/api/invoices/${pdfInvId}`), 200, 'supprimer la facture');
+    assert.ok(!(await bob.get('/api/documents')).body.some((d) => d.id === pdfInv.document_id), 'supprimer la facture emporte son PDF');
+
     // Facture rattachée à un enfant : seuls SES parents désignés se la partagent (bug observé : tout le
     // cercle — beaux-parents compris — « devait » rembourser celui qui avait payé, alors que seul
     // l'autre parent est concerné).

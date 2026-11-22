@@ -883,8 +883,11 @@ function canModifyOwn(user, row) {
   return row.created_by === user.id || (!!user.is_admin && (row.created_by == null || !userExists(row.created_by)));
 }
 const ownOnly = (what) => new HttpError(403, `Seule la personne qui a créé ${what} peut la modifier ou la supprimer.`);
+// Le PDF d'une facture du portail appartient à la facture, pas à la dépense qu'elle a créée : supprimer la
+// dépense (ce qui redonne la facture en attente) ne doit pas le faire disparaître.
+const docUsedByInvoice = (docId) => !!db.prepare('SELECT 1 FROM invoices WHERE document_id=?').get(docId);
 function dropExpenseDocument(row) {
-  if (!row.document_id) return;
+  if (!row.document_id || docUsedByInvoice(row.document_id)) return;
   const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(row.document_id);
   if (doc) { db.prepare('DELETE FROM documents WHERE id=?').run(doc.id); rmFile(doc.stored_name); }
 }
@@ -945,8 +948,8 @@ function syncEventExpense(before, after, userId) {
 // /invoices/:id/assign) et n'entre pas dans les comptes.
 function createExpenseForInvoice(inv, payerId, date, userId) {
   const members = circleMemberIds(inv.circle_id);
-  const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(equalSplit(participantsForChild(inv.circle_id, inv.child_id))), inv.child_id || null, userId);
+  const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by,document_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(equalSplit(participantsForChild(inv.circle_id, inv.child_id))), inv.child_id || null, userId, inv.document_id || null);
   db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
   emitTo(members, { type: 'refresh', what: 'expenses' });
   return r.lastInsertRowid;
@@ -1438,6 +1441,11 @@ api.delete('/invoices/:id', (req, res) => {
   if (!req.user.is_admin) requireMember(req.user, row.circle_id);
   if (row.expense_id) db.prepare('DELETE FROM expenses WHERE id=?').run(row.expense_id);
   db.prepare('DELETE FROM invoices WHERE id=?').run(row.id);
+  if (row.document_id) { // son PDF part avec elle (la dépense, supprimée juste avant, le pointait aussi)
+    const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(row.document_id);
+    if (doc) { db.prepare('DELETE FROM documents WHERE id=?').run(doc.id); rmFile(doc.stored_name); }
+    if (row.circle_id) emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'documents' });
+  }
   res.json({ ok: true });
 });
 // Attribue (ou corrige) le cercle et/ou l'enfant concerné par une facture. Changer le cercle est
@@ -1469,6 +1477,7 @@ api.put('/invoices/:id/attribute', (req, res) => {
     }
   }
   db.prepare("UPDATE invoices SET circle_id=?, child_id=?, updated_at=datetime('now') WHERE id=?").run(circleId, childId, row.id);
+  if (circleId && circleId !== row.circle_id && row.document_id) db.prepare('UPDATE documents SET circle_id=? WHERE id=?').run(circleId, row.document_id);
   // Facture déjà payée (donc déjà dans Budget) : changer l'enfant répercute enfant ET partage sur la
   // dépense, comme pour un événement (voir syncEventExpense) — les parents de l'enfant ne sont plus les mêmes.
   if (row.expense_id && circleId === row.circle_id && childId !== row.child_id) {
@@ -1772,7 +1781,7 @@ api.post('/expenses/:id/invoice', uploadInvoice.single('file'), (req, res) => {
     if (!f) throw bad('Aucun fichier reçu.');
     if (!isPdf(f.path)) throw bad('Seuls les fichiers PDF sont acceptés pour une facture.');
     const tx = db.transaction(() => {
-      if (row.document_id) {
+      if (row.document_id && !docUsedByInvoice(row.document_id)) {
         const old = db.prepare('SELECT * FROM documents WHERE id=?').get(row.document_id);
         if (old) { db.prepare('DELETE FROM documents WHERE id=?').run(old.id); rmFile(old.stored_name); }
       }
@@ -1796,7 +1805,8 @@ api.delete('/expenses/:id/invoice', (req, res) => {
   if (!canModifyOwn(req.user, row)) throw ownOnly('cette dépense');
   if (row.document_id) {
     const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(row.document_id);
-    if (doc) { db.prepare('DELETE FROM documents WHERE id=?').run(doc.id); rmFile(doc.stored_name); }
+    // Le PDF d'une facture du portail reste dans Documents (il appartient à la facture) : on le détache seulement.
+    if (doc && !docUsedByInvoice(doc.id)) { db.prepare('DELETE FROM documents WHERE id=?').run(doc.id); rmFile(doc.stored_name); }
     db.prepare('UPDATE expenses SET document_id=NULL WHERE id=?').run(row.id);
   }
   emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'expenses' });
@@ -2502,12 +2512,51 @@ function upsertInvoice(circleId, childId, item) {
     if (existing) {
       db.prepare("UPDATE invoices SET label=?, number=?, date=?, due_date=?, amount_cents=?, status=?, updated_at=datetime('now') WHERE id=?")
         .run(label, number, item.date, due, amountCents, status, existing.id);
+      attachInvoiceFile(existing.id, item);
       return { ok: true, id: existing.id, updated: true };
     }
   }
   const r = db.prepare('INSERT INTO invoices(circle_id,child_id,label,number,date,due_date,amount_cents,status,source,external_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
     .run(circleId, childId, label, number, item.date, due, amountCents, status, src, extId);
+  attachInvoiceFile(r.lastInsertRowid, item);
   return { ok: true, id: r.lastInsertRowid, updated: false };
+}
+// PDF de la facture, s'il accompagne l'élément (file_data : Buffer fourni par un addon, ou file_base64 pour
+// un script d'import) : rangé dans Documents (catégorie « Facture ») du cercle de la facture, et rattaché à
+// sa dépense si elle est déjà payée. Sans cercle (facture pas encore orientée) on ne range rien : le PDF
+// sera repris à la synchronisation suivante, une fois le cercle attribué. Un PDF déjà rangé n'est jamais
+// remplacé. Un fichier qui n'est pas un vrai PDF, ou trop gros, est ignoré sans faire échouer la facture.
+function attachInvoiceFile(invoiceId, item) {
+  let data = null;
+  if (Buffer.isBuffer(item.file_data)) data = item.file_data;
+  else if (typeof item.file_base64 === 'string' && item.file_base64) { try { data = Buffer.from(item.file_base64, 'base64'); } catch { data = null; } }
+  if (!data || !data.length || data.length > 25 * 1024 * 1024 || data.slice(0, 5).toString() !== '%PDF-') return;
+  const inv = db.prepare('SELECT * FROM invoices WHERE id=?').get(invoiceId);
+  if (!inv || !inv.circle_id || inv.document_id) return;
+  const stored = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(UPLOAD_DIR, stored), data);
+  const filename = fixName(`${inv.number}.pdf`);
+  try {
+    db.transaction(() => {
+      const doc = db.prepare('INSERT INTO documents(circle_id,title,category,filename,stored_name,mime,size,created_by) VALUES(?,?,?,?,?,?,?,NULL)')
+        .run(inv.circle_id, `Facture — ${inv.label} — ${inv.number}`, 'Facture', filename, stored, 'application/pdf', data.length);
+      db.prepare('UPDATE invoices SET document_id=? WHERE id=?').run(doc.lastInsertRowid, inv.id);
+      if (inv.expense_id) db.prepare('UPDATE expenses SET document_id=? WHERE id=? AND document_id IS NULL').run(doc.lastInsertRowid, inv.expense_id);
+    })();
+  } catch (e) { rmFile(stored); throw e; }
+  const ids = circleMemberIds(inv.circle_id);
+  emitTo(ids, { type: 'refresh', what: 'documents' });
+  emitTo(ids, { type: 'refresh', what: 'invoices' });
+  if (inv.expense_id) emitTo(ids, { type: 'refresh', what: 'expenses' });
+}
+// Le PDF de cette facture manque-t-il encore (et peut-on le ranger) ? Donné aux addons pour qu'ils ne
+// téléchargent que ce qui manque : facture connue sans PDF mais avec un cercle, ou facture nouvelle dont
+// le cercle se devine déjà.
+function invoiceNeedsFile(item) {
+  if (!item || !item.external_id) return false;
+  const existing = db.prepare('SELECT circle_id, document_id FROM invoices WHERE source=? AND external_id=?').get((item.source && String(item.source).slice(0, 40)) || 'eportail', String(item.external_id).slice(0, 200));
+  if (existing) return !existing.document_id && existing.circle_id != null;
+  return !!resolveImportCircle(item);
 }
 function checkImportToken(req, res) {
   const token = getSetting('integration_token', null);
@@ -2555,7 +2604,7 @@ async function runAddonSync(id) {
   const addon = addonManager.find(id);
   if (!addon) throw new HttpError(404, 'Addon inconnu.');
   if (!addonManager.isEnabled(id)) throw new HttpError(400, "Cet addon n'est pas activé.");
-  const raw = await addon.sync(addonManager.configOf(id));
+  const raw = await addon.sync(addonManager.configOf(id), { needsInvoiceFile: invoiceNeedsFile });
   const applied = applyAddonResult(raw);
   addonManager.recordSyncOk(id);
   return applied;
