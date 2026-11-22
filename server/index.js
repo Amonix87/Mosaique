@@ -38,6 +38,7 @@ const EXPENSE_CATEGORY_FOR_EVENT = { 'Santé': 'Santé', 'École': 'École', 'Ac
 const EXPENSE_REPEATS = ['weekly', 'monthly', 'quarterly', 'yearly'];
 const EVENT_PRICE_REPEAT_MSG = "Un prix ne peut être associé qu'à un événement qui ne se répète pas (pour un paiement régulier, utilisez une dépense récurrente dans Budget).";
 const appUrl = require('./settings');
+const { parseInvoicePdf } = require('./invoice-pdf');
 
 const app = express();
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
@@ -945,6 +946,86 @@ function syncEventExpense(before, after, userId) {
   emitTo(circleMemberIds(after.circle_id), { type: 'refresh', what: 'expenses' });
 }
 
+/* ── Répartition d'une facture périscolaire selon la garde ─────────────────────────────────────────
+   Le PDF de la facture donne, pour chaque service, les jours exacts (voir server/invoice-pdf.js). Chaque
+   jour est mis au compte du parent qui avait alors l'enfant :
+   - cantine (repas), centre de loisirs (ALSH) et tout service inconnu : 50/50 ;
+   - garderie du matin / du soir, mercredi matin / après-midi : le parent « de garde » à l'heure du
+     service. La garde est notée par nuit : le jour d'une transition (la nuit d'avant et celle du jour ne
+     sont pas au même parent), le parent d'avant a l'enfant jusqu'à l'heure de transition (celle de
+     l'enfant, dans Famille → Enfants, ou celle fixée pour ce jour-là), puis le parent du jour. Sans
+     transition ce jour-là, le parent de la nuit.
+   Les heures des services sont des repères (une garderie du matin commence avant n'importe quelle
+   transition de l'après-midi…). Sans calcul possible (pas de PDF lisible, deux parents désignés requis,
+   nuit non renseignée, total différent du montant de la facture), on retombe sur le partage égal. */
+const SERVICE_TIME = { garderie_matin: '08:00', mercredi_matin: '09:00', mercredi_apres_midi: '14:00', garderie_soir: '17:30' };
+const DEFAULT_HANDOVER_TIME = '12:00'; // enfant sans heure de transition renseignée
+
+function invoiceDetail(inv) {
+  if (inv.detail) return parseJ(inv.detail, null);
+  if (!inv.document_id) return null;
+  const doc = db.prepare('SELECT stored_name FROM documents WHERE id=?').get(inv.document_id);
+  if (!doc) return null;
+  let buf;
+  try { buf = fs.readFileSync(path.join(UPLOAD_DIR, doc.stored_name)); } catch { return null; }
+  const d = parseInvoicePdf(buf);
+  if (d && inv.id) db.prepare('UPDATE invoices SET detail=? WHERE id=?').run(JSON.stringify(d), inv.id);
+  return d;
+}
+function backfillInvoiceDetails() {
+  let n = 0;
+  for (const inv of db.prepare('SELECT * FROM invoices WHERE document_id IS NOT NULL AND detail IS NULL').all()) if (invoiceDetail(inv)) n++;
+  if (n) console.log(`[factures] détail lu dans ${n} PDF`);
+}
+
+function allocateInvoice(inv, detail) {
+  if (!detail || !inv.child_id || !inv.circle_id || detail.total_cents !== inv.amount_cents) return null;
+  if (detail.lines.some((l) => l.dates.length !== l.qty)) return null; // lecture douteuse : on ne devine pas
+  const parents = participantsForChild(inv.circle_id, inv.child_id);
+  if (parents.length !== 2) return null;
+  const [p1, p2] = parents;
+  const child = db.prepare('SELECT handover_time FROM children WHERE id=?').get(inv.child_id);
+  const days = detail.lines.flatMap((l) => l.dates);
+  const first = addDays(days.reduce((a, d) => (d < a ? d : a), days[0] || '9999-12-31'), -1);
+  const last = days.reduce((a, d) => (d > a ? d : a), days[0] || '0000-01-01');
+  const nights = new Map(db.prepare('SELECT date,parent_id FROM custody_nights WHERE child_id=? AND date>=? AND date<=?').all(inv.child_id, first, last).map((r) => [r.date, r.parent_id]));
+  const overrides = new Map(db.prepare('SELECT date,time FROM custody_handovers WHERE child_id=? AND date>=? AND date<=?').all(inv.child_id, first, last).map((r) => [r.date, r.time]));
+  const ownerOf = (kind, date) => {
+    const today = nights.get(date);
+    if (!today) return null;
+    const before = nights.get(addDays(date, -1));
+    if (!before || before === today) return today;
+    const handover = overrides.get(date) || (child && child.handover_time) || DEFAULT_HANDOVER_TIME;
+    return SERVICE_TIME[kind] < handover ? before : today;
+  };
+  const acc = { [p1]: 0, [p2]: 0 };
+  const breakdown = {};
+  let fallbackDays = 0;
+  const addTo = (kind, who, c) => {
+    const b = (breakdown[kind] = breakdown[kind] || { total_cents: 0, by: { [p1]: 0, [p2]: 0 } });
+    b.total_cents += c;
+    if (who === null) { b.by[p1] += c / 2; b.by[p2] += c / 2; acc[p1] += c / 2; acc[p2] += c / 2; } else { b.by[who] += c; acc[who] += c; }
+  };
+  for (const l of detail.lines) {
+    if (!SERVICE_TIME[l.kind] || !l.dates.length) { addTo(l.kind, null, l.total_cents); continue; }
+    const perDay = l.total_cents / l.dates.length;
+    for (const d of l.dates) {
+      const o = ownerOf(l.kind, d);
+      if (o !== p1 && o !== p2) { fallbackDays++; addTo(l.kind, null, perDay); } else addTo(l.kind, o, perDay);
+    }
+  }
+  const c1 = Math.round(acc[p1]);
+  const pct1 = Math.round((c1 / inv.amount_cents) * 10000) / 100;
+  const split = { [p1]: pct1, [p2]: Math.round((100 - pct1) * 100) / 100 };
+  for (const b of Object.values(breakdown)) { b.total_cents = Math.round(b.total_cents); for (const k of Object.keys(b.by)) b.by[k] = Math.round(b.by[k]); }
+  return { split, breakdown, fallback_days: fallbackDays };
+}
+// Partage d'une facture : selon la garde quand le PDF le permet, sinon à parts égales entre les parents.
+function splitForInvoice(inv) {
+  const al = allocateInvoice(inv, invoiceDetail(inv));
+  return al ? al.split : equalSplit(participantsForChild(inv.circle_id, inv.child_id));
+}
+
 // Facture périscolaire (reçue par addon, voir applyAddonResult) → dépense partagée dans Budget,
 // une fois attribuée à la personne qui l'a payée. Partage égal entre les parents désignés de l'enfant
 // concerné (comme pour le prix d'un événement : voir participantsForChild), et seulement à défaut
@@ -956,7 +1037,7 @@ function syncEventExpense(before, after, userId) {
 function createExpenseForInvoice(inv, payerId, date, userId) {
   const members = circleMemberIds(inv.circle_id);
   const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by,document_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
-    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(equalSplit(participantsForChild(inv.circle_id, inv.child_id))), inv.child_id || null, userId, inv.document_id || null);
+    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(splitForInvoice(inv)), inv.child_id || null, userId, inv.document_id || null);
   db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
   emitTo(members, { type: 'refresh', what: 'expenses' });
   return r.lastInsertRowid;
@@ -1442,6 +1523,51 @@ api.get('/invoices', (req, res) => {
   if (!clauses.length) return res.json([]);
   res.json(db.prepare(`SELECT * FROM invoices WHERE ${clauses.join(' OR ')} ORDER BY date DESC, id DESC`).all(...params));
 });
+// Répartition selon la garde des factures déjà payées (voir allocateInvoice) : aperçu, puis application
+// facture par facture. Rien n'est modifié par l'aperçu. delta_cents = ce que chacun devrait en plus (ou en
+// moins, si négatif) sur cette facture par rapport à la répartition actuelle de sa dépense.
+function invoiceAllocationRows(cid) {
+  const rows = []; const skipped = [];
+  for (const inv of db.prepare('SELECT * FROM invoices WHERE circle_id=? AND expense_id IS NOT NULL ORDER BY date, id').all(cid)) {
+    const exp = db.prepare('SELECT * FROM expenses WHERE id=?').get(inv.expense_id);
+    if (!exp) continue;
+    const al = allocateInvoice(inv, invoiceDetail(inv));
+    if (!al) { skipped.push({ invoice_id: inv.id, number: inv.number, reason: inv.document_id ? 'détail du PDF absent ou douteux, ou garde non renseignée' : 'PDF pas encore récupéré' }); continue; }
+    const cur = parseJ(exp.split, {});
+    const now = computeShares(exp.amount_cents, al.split);
+    const was = computeShares(exp.amount_cents, cur);
+    const ids = [...new Set([...Object.keys(cur), ...Object.keys(al.split)])];
+    const delta = {}; for (const id of ids) delta[id] = (now[id] || 0) - (was[id] || 0);
+    rows.push({
+      invoice_id: inv.id, number: inv.number, label: inv.label, date: inv.date, amount_cents: exp.amount_cents, expense_id: exp.id, paid_by: exp.paid_by,
+      current: cur, proposed: al.split, delta_cents: delta, breakdown: al.breakdown, fallback_days: al.fallback_days,
+      changed: ids.some((id) => Math.abs((cur[id] || 0) - (al.split[id] || 0)) > 0.005),
+      _exp: exp,
+    });
+  }
+  return { rows, skipped };
+}
+api.get('/invoices/allocation', (req, res) => {
+  const cid = requireMember(req.user, req.query.circle_id);
+  const { rows, skipped } = invoiceAllocationRows(cid);
+  res.json({
+    invoices: rows.map(({ _exp, ...r }) => ({ ...r, can_edit: canModifyOwn(req.user, _exp) })),
+    skipped,
+  });
+});
+api.post('/invoices/allocation/apply', (req, res) => {
+  const cid = requireMember(req.user, (req.body || {}).circle_id);
+  const wanted = new Set(((req.body || {}).invoice_ids || []).map(Number));
+  const applied = []; const refused = [];
+  for (const r of invoiceAllocationRows(cid).rows) {
+    if (!wanted.has(r.invoice_id) || !r.changed) continue;
+    if (!canModifyOwn(req.user, r._exp)) { refused.push(r.invoice_id); continue; }
+    db.prepare('UPDATE expenses SET split=? WHERE id=?').run(JSON.stringify(r.proposed), r.expense_id);
+    applied.push(r.invoice_id);
+  }
+  if (applied.length) emitTo(circleMemberIds(cid), { type: 'refresh', what: 'expenses' });
+  res.json({ applied, refused });
+});
 api.delete('/invoices/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
   if (!row) throw new HttpError(404, 'Introuvable.');
@@ -1489,7 +1615,7 @@ api.put('/invoices/:id/attribute', (req, res) => {
   // dépense, comme pour un événement (voir syncEventExpense) — les parents de l'enfant ne sont plus les mêmes.
   if (row.expense_id && circleId === row.circle_id && childId !== row.child_id) {
     db.prepare('UPDATE expenses SET child_id=?, split=? WHERE id=?')
-      .run(childId, JSON.stringify(equalSplit(participantsForChild(circleId, childId))), row.expense_id);
+      .run(childId, JSON.stringify(splitForInvoice({ ...row, circle_id: circleId, child_id: childId })), row.expense_id);
     emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'expenses' });
   }
   if (circleId) emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'invoices' });
@@ -2548,7 +2674,8 @@ function attachInvoiceFile(invoiceId, item) {
     db.transaction(() => {
       const doc = db.prepare('INSERT INTO documents(circle_id,title,category,filename,stored_name,mime,size,created_by) VALUES(?,?,?,?,?,?,?,NULL)')
         .run(inv.circle_id, `Facture — ${inv.label} — ${inv.number}`, 'Facture', filename, stored, 'application/pdf', data.length);
-      db.prepare('UPDATE invoices SET document_id=? WHERE id=?').run(doc.lastInsertRowid, inv.id);
+      const d = parseInvoicePdf(data);
+      db.prepare('UPDATE invoices SET document_id=?, detail=? WHERE id=?').run(doc.lastInsertRowid, d ? JSON.stringify(d) : null, inv.id);
       if (inv.expense_id) db.prepare('UPDATE expenses SET document_id=? WHERE id=? AND document_id IS NULL').run(doc.lastInsertRowid, inv.expense_id);
     })();
   } catch (e) { rmFile(stored); throw e; }
@@ -2962,6 +3089,7 @@ if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
   setInterval(tick, 30000);
   dedupeAllReservations();
+  backfillInvoiceDetails();
   app.listen(port, '0.0.0.0', () => console.log(`Mosaïque écoute sur le port ${port}`));
   startAutoRefresh();
 }

@@ -608,6 +608,11 @@ if (invoiceCols2.find((c) => c.name === 'circle_id')?.notnull) {
 if (!db.prepare('PRAGMA table_info(invoices)').all().some((c) => c.name === 'document_id')) {
   db.exec('ALTER TABLE invoices ADD COLUMN document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL');
 }
+// Détail lu dans le PDF (voir server/invoice-pdf.js) : service, prix, jours — sert à répartir la facture
+// selon la garde. NULL tant que le PDF n'est pas là ou n'a pas pu être lu.
+if (!db.prepare('PRAGMA table_info(invoices)').all().some((c) => c.name === 'detail')) {
+  db.exec('ALTER TABLE invoices ADD COLUMN detail TEXT');
+}
 // Réparation : les premiers PDF rangés avaient un nom de fichier aux accents abîmés (« P�risco5166.pdf »).
 db.exec(`UPDATE documents SET filename = (SELECT replace(i.number, '/', '_') || '.pdf' FROM invoices i WHERE i.document_id = documents.id)
   WHERE id IN (SELECT document_id FROM invoices WHERE document_id IS NOT NULL) AND filename LIKE '%' || char(65533) || '%'`);

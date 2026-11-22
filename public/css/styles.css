@@ -436,3 +436,10 @@ dialog.modal.sheet .btn.primary { width: 100%; justify-content: center; padding:
 
 /* Facture PDF présente dans Documents : l'icône du document ressort en vert sur la ligne. */
 .icon-btn.doc-ok { color: var(--moss); }
+
+/* Budget → « Répartition selon la garde » : aperçu avant/après par facture. */
+.alloc-row { align-items: flex-start; }
+.alloc-row input[type=checkbox] { margin-top: .3rem; }
+.alloc-row small { display: block; }
+.alloc-row details { margin-top: .25rem; font-size: .85rem; }
+.alloc-detail { margin: .3rem 0 0; padding-left: 1.1rem; }

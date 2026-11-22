@@ -1429,6 +1429,87 @@ async function main() {
     assert.strictEqual(revived.expense_id, null, 'supprimer la dépense redonne automatiquement la facture en attente');
     assert.strictEqual(revived.assigned_to, C, 'toujours attribuée à Carla, juste de nouveau non payée');
 
+    // Lecture du PDF de facture (détail jour par jour) et répartition selon la garde.
+    {
+      const zlib = require('zlib');
+      const { parseInvoicePdf } = require('../server/invoice-pdf.js');
+      const DAYC = ['di', 'lu', 'ma', 'me', 'je', 've', 'sa'];
+      const dc = (iso) => `${DAYC[new Date(`${iso}T00:00:00Z`).getUTCDay()]}${Number(iso.slice(8))}`;
+      // Même structure que les vrais PDF du portail (JasperReports) : un Tm/Tf/Tj par morceau de texte,
+      // le € en WinAnsi (0x80), les dates de chaque ligne sous elle (« 03  -  ve14 »).
+      const makePdf = ({ number, from, to, services, total }) => {
+        let y = 600; let c = '';
+        const T = (x, yy, t) => { c += `BT\n1 0 0 1 ${x} ${yy} Tm\n/F1 8 Tf\n0 0 0 rg\n(${t.replace(/[()\\]/g, '\\$&')})Tj\n0 g\nET\n`; };
+        T(21, 700, `Période du ${from} au ${to}`);
+        T(22, 680, 'BOURY Léopold né le 08/04/2019');
+        for (const sv of services) {
+          T(28, y, sv.label); T(388, y, sv.pu.toFixed(2)); T(449, y, String(sv.dates.length)); T(511, y, `${(sv.pu * sv.dates.length).toFixed(2)} \x80`);
+          y -= 9.3;
+          const byMonth = {}; for (const d of sv.dates) (byMonth[d.slice(5, 7)] = byMonth[d.slice(5, 7)] || []).push(dc(d));
+          for (const [m, ds] of Object.entries(byMonth)) { T(28, y, `${m}  -  ${ds.join(' ')}`); y -= 9.3; }
+          y -= 10;
+        }
+        T(28, 100, 'Total TTC'); T(28, 90, `${total.toFixed(2)} \x80`);
+        const body = zlib.deflateSync(Buffer.from(c, 'latin1'));
+        return Buffer.concat([Buffer.from(`%PDF-1.4\n6 0 obj\n<</Filter/FlateDecode/Length ${body.length}>>\nstream\n`), body, Buffer.from('\nendstream\nendobj\ntrailer<<>>\n%%EOF\n')]);
+      };
+      // 1) Lecture : types de services, jours, années déduites du jour de la semaine, mois à cheval sur deux années.
+      const pdfA = parseInvoicePdf(makePdf({ number: 'X', from: '01/12/2030', to: '04/01/2031', total: 9, services: [
+        { label: 'REPAS - LES RABOLIOTS (j.)', pu: 4.5, dates: ['2030-12-30', '2031-01-02'] },
+      ] }));
+      assert.ok(pdfA && pdfA.warnings.length === 0, `PDF lisible sans réserve (${pdfA && pdfA.warnings})`);
+      assert.deepStrictEqual(pdfA.lines[0].dates, ['2030-12-30', '2031-01-02'], "l'année se déduit du jour de la semaine, même à cheval sur deux années");
+      assert.strictEqual(pdfA.lines[0].kind, 'cantine');
+      assert.strictEqual(pdfA.total_cents, 900);
+      assert.strictEqual(parseInvoicePdf(Buffer.from('%PDF-1.4 rien de lisible')), null, 'un PDF inattendu ne donne rien (pas de devinette)');
+      // 2) Répartition selon la garde. Nuits : Léo chez Alice le 13, chez Bob le 14 → transition le 14.
+      const D13 = '2031-03-13'; const D14 = '2031-03-14';
+      const svc = [
+        { label: 'GARDERIE MATIN - LES RABOLIOTS (j.)', pu: 1, dates: [D14] },
+        { label: 'GARDERIE SOIR - LES RABOLIOTS (j.)', pu: 3, dates: [D14] },
+        { label: 'REPAS - LES RABOLIOTS (j.)', pu: 4, dates: [D13, D14] },
+        { label: 'MERCREDI APRES MIDI - LES RABOLIOTS (j.)', pu: 5, dates: [D13] },
+      ];
+      const gard = makePdf({ number: 'F-GARDE-1', from: '01/03/2031', to: '31/03/2031', total: 17, services: svc }).toString('base64');
+      ok(await alice.put('/api/custody', { date_from: D13, date_to: D13, child_ids: [kid1], parent_id: A }), 200);
+      ok(await alice.put('/api/custody', { date_from: D14, date_to: D14, child_ids: [kid1], parent_id: B }), 200);
+      ok(await alice.put(`/api/children/${kid1}`, { handover_time: '16:30' }), 200);
+      const gb = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Périscolaire', number: 'F-GARDE-1', date: '2031-04-02', amount: 17, circle_id: circle, external_id: 'eportail-garde1', file_base64: gard });
+      const gInv = gb.body.results[0].id;
+      ok(await bob.put(`/api/invoices/${gInv}/attribute`, { child_id: kid1 }), 200);
+      const gPaid = (await alice.put(`/api/invoices/${gInv}/assign`, { assigned_to: A, paid: true, date: '2031-04-03' })).body;
+      let gExp = (await alice.get('/api/expenses')).body.find((e) => e.id === gPaid.expense_id);
+      // Alice : matin du 14 (avant 16:30 → parent d'avant = Alice) 1 € + mercredi aprèm du 13 (Alice) 5 € + moitié des repas 4 € = 10 € ;
+      // Bob : soir du 14 (après 16:30 → Bob) 3 € + moitié des repas 4 € = 7 €.
+      assert.deepStrictEqual(gExp.split, { [A]: 58.82, [B]: 41.18 }, 'facture répartie selon la garde (cantine 50/50, services à l\'heure de transition)');
+      let alloc = (await alice.get(`/api/invoices/allocation?circle_id=${circle}`)).body;
+      let gRow = alloc.invoices.find((r) => r.invoice_id === gInv);
+      assert.ok(gRow && gRow.changed === false && gRow.can_edit === true, "l'aperçu confirme : rien à changer");
+      assert.strictEqual(gRow.breakdown.cantine.by[A], 400, 'détail par service : cantine 50/50');
+      // Transition ponctuelle à 19:00 le 14 : la garderie du soir (17:30) est encore chez Alice.
+      ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: D14, location: 'Chez mamie', time: '19:00' }), 200);
+      alloc = (await alice.get(`/api/invoices/allocation?circle_id=${circle}`)).body;
+      gRow = alloc.invoices.find((r) => r.invoice_id === gInv);
+      assert.ok(gRow.changed && gRow.proposed[A] === 76.47, 'avec une transition à 19:00, le soir du 14 passe à Alice (13/17)');
+      assert.strictEqual(gRow.delta_cents[B], -300, "Bob devrait 3 € de moins");
+      ok(await bob.post('/api/invoices/allocation/apply', { circle_id: circle, invoice_ids: [gInv] }), 200, 'Bob ne crée pas cette dépense : refusé sans erreur');
+      assert.deepStrictEqual((await alice.get('/api/expenses')).body.find((e) => e.id === gPaid.expense_id).split, { [A]: 58.82, [B]: 41.18 }, "Bob n'a rien modifié (seul le créateur de la dépense le peut)");
+      const applied = (await alice.post('/api/invoices/allocation/apply', { circle_id: circle, invoice_ids: [gInv] })).body;
+      assert.deepStrictEqual(applied.applied, [gInv], 'application demandée par le créateur de la dépense');
+      gExp = (await alice.get('/api/expenses')).body.find((e) => e.id === gPaid.expense_id);
+      assert.deepStrictEqual(gExp.split, { [A]: 76.47, [B]: 23.53 });
+      // Sans PDF lisible (montant différent) : partage égal, jamais de devinette.
+      const bad = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Périscolaire', number: 'F-GARDE-2', date: '2031-04-02', amount: 99, circle_id: circle, external_id: 'eportail-garde2', file_base64: gard });
+      ok(await bob.put(`/api/invoices/${bad.body.results[0].id}/attribute`, { child_id: kid1 }), 200);
+      const badPaid = (await alice.put(`/api/invoices/${bad.body.results[0].id}/assign`, { assigned_to: A, paid: true, date: '2031-04-03' })).body;
+      assert.deepStrictEqual((await alice.get('/api/expenses')).body.find((e) => e.id === badPaid.expense_id).split, { [A]: 50, [B]: 50 }, "total du PDF ≠ montant de la facture : partage égal");
+      // Nettoyage.
+      for (const id of [gPaid.expense_id, badPaid.expense_id]) ok(await alice.del(`/api/expenses/${id}`), 200);
+      ok(await alice.del(`/api/invoices/${gInv}`), 200); ok(await alice.del(`/api/invoices/${bad.body.results[0].id}`), 200);
+      ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: D14, location: null, time: null }), 200);
+      ok(await alice.put('/api/custody', { date_from: D13, date_to: D14, child_ids: [kid1], parent_id: null }), 200);
+      ok(await alice.put(`/api/children/${kid1}`, { handover_time: '' }), 200);
+    }
     // Téléchargement du PDF depuis le portail : le lien redirige vers un stockage externe, qui ne doit
     // JAMAIS recevoir le cookie de session du portail ; le contenu n'est accepté que s'il s'agit d'un PDF.
     {

@@ -232,6 +232,60 @@ async function pairDetail({ circleId, from, to, amountCents, done }) {
       h('button', { class: 'btn primary', type: 'button', onclick: () => { close(); settlementForm({ circleId, done, from, to, amountCents }); } }, 'Rembourser'))), { wide: true });
 }
 
+/* ── Répartir les factures du portail selon la garde ─────────────────────────────────────────────
+   Le PDF d'une facture périscolaire détaille les jours de chaque service. Cantine et centre de loisirs
+   restent à 50/50 ; garderies et mercredis vont au parent qui avait l'enfant à l'heure du service (garde
+   par nuit + heure de transition de l'enfant, ou celle fixée pour le jour). Cette fenêtre montre, facture
+   par facture, la répartition actuelle, la proposée et l'écart ; rien n'est modifié avant « Appliquer »
+   (GET /invoices/allocation puis POST /invoices/allocation/apply). ── */
+const KIND_NAMES = { cantine: 'Cantine (50/50)', alsh: 'Centre de loisirs (50/50)', garderie_matin: 'Garderie du matin', garderie_soir: 'Garderie du soir',
+  mercredi_matin: 'Mercredi matin', mercredi_apres_midi: 'Mercredi après-midi', autre: 'Autre (50/50)' };
+async function allocationDialog({ circleId, done }) {
+  const data = await get(`/invoices/allocation?circle_id=${circleId}`);
+  const pctText = (split) => Object.entries(split).map(([id, v]) => `${userName(Number(id))} ${fmtPct(v)} %`).join(' · ');
+  const changed = data.invoices.filter((r) => r.changed);
+  const same = data.invoices.length - changed.length;
+  const checks = new Map();
+  const summary = h('p', { class: 'muted' });
+  const refresh = () => {
+    const tot = {};
+    for (const r of changed) if (checks.get(r.invoice_id).checked) for (const [id, v] of Object.entries(r.delta_cents)) tot[id] = (tot[id] || 0) + v;
+    const parts = Object.entries(tot).filter(([, v]) => v !== 0).map(([id, v]) => `${userName(Number(id))} ${v > 0 ? '+' : '−'} ${euro(Math.abs(v))}`);
+    summary.textContent = parts.length ? `Part supportée en plus ou en moins, par personne : ${parts.join(' · ')}.` : 'Aucun changement sur les comptes pour la sélection.';
+  };
+  const rowNode = (r) => {
+    const box = h('input', { type: 'checkbox', checked: r.can_edit, disabled: !r.can_edit, 'aria-label': `Appliquer à ${r.number}`, onchange: refresh });
+    checks.set(r.invoice_id, box);
+    return h('li', { class: 'expense-row alloc-row' },
+      box,
+      h('div', { class: 'expense-main' },
+        h('strong', null, `${r.number} · ${euro(r.amount_cents)}`),
+        h('small', null, fmtDayY(r.date), ' · actuel : ', pctText(r.current)),
+        h('small', null, 'proposé : ', pctText(r.proposed), ' · ', Object.entries(r.delta_cents).filter(([, v]) => v !== 0).map(([id, v]) => `${userName(Number(id))} ${v > 0 ? '+' : '−'} ${euro(Math.abs(v))}`).join(' · ')),
+        !r.can_edit ? h('small', { class: 'muted' }, 'Seule la personne qui a créé cette dépense peut la modifier.') : null,
+        r.fallback_days ? h('small', { class: 'muted' }, `${r.fallback_days} jour(s) sans garde renseignée : comptés à 50/50.`) : null,
+        h('details', null, h('summary', null, 'Détail par service'),
+          h('ul', { class: 'alloc-detail' }, Object.entries(r.breakdown).map(([k, b]) => h('li', null,
+            `${KIND_NAMES[k] || k} — ${euro(b.total_cents)} : `, Object.entries(b.by).map(([id, v]) => `${userName(Number(id))} ${euro(v)}`).join(' · ')))))));
+  };
+  const close = modal('Répartir selon la garde', h('div', { class: 'stack' },
+    h('p', null, "Les factures périscolaires déjà payées sont revues d'après le détail de leur PDF : cantine et centre de loisirs à 50/50, garderies et mercredis au parent qui avait l'enfant à l'heure du service (selon la garde et l'heure de transition réglée pour l'enfant)."),
+    changed.length ? h('ul', { class: 'expense-list' }, changed.map(rowNode)) : emptyState(data.invoices.length ? 'Toutes les factures lisibles sont déjà réparties selon la garde.' : 'Aucune facture payée avec un PDF lisible pour le moment.'),
+    same ? h('p', { class: 'muted' }, `${same} facture${same > 1 ? 's' : ''} déjà conforme${same > 1 ? 's' : ''}.`) : null,
+    data.skipped.length ? h('p', { class: 'muted' }, `${data.skipped.length} facture${data.skipped.length > 1 ? 's' : ''} non calculable${data.skipped.length > 1 ? 's' : ''} pour l'instant (PDF pas encore récupéré, ou garde non renseignée sur la période) : ${data.skipped.slice(0, 6).map((x) => x.number).join(', ')}${data.skipped.length > 6 ? '…' : ''}.`) : null,
+    changed.length ? summary : null,
+    h('div', { class: 'row end gap' },
+      h('button', { class: 'btn', type: 'button', onclick: () => close() }, 'Fermer'),
+      changed.length ? h('button', { class: 'btn primary', type: 'button', onclick: () => act(async () => {
+        const ids = changed.filter((r) => checks.get(r.invoice_id).checked).map((r) => r.invoice_id);
+        if (!ids.length) { toast('Rien de coché'); return; }
+        const res = await post('/invoices/allocation/apply', { circle_id: circleId, invoice_ids: ids });
+        toast(`${res.applied.length} facture${res.applied.length > 1 ? 's' : ''} répartie${res.applied.length > 1 ? 's' : ''} selon la garde`);
+        close(); done();
+      }) }, 'Appliquer') : null)), { wide: true });
+  if (changed.length) refresh();
+}
+
 /* ── Attribution d'une facture périscolaire en attente (voir Réglages → Modules complémentaires) :
    à quelqu'un qui va la payer, ou qui l'a déjà payée (ce qui la fait basculer dans l'historique
    comme une dépense ordinaire, partagée à égalité entre les membres du cercle) — et, si on en suit
@@ -319,6 +373,7 @@ export async function budget(root) {
   const listBox = h('div', { class: 'stack' });
 
   append(root, pageHead('Budget', h('div', { class: 'row gap' },
+    h('button', { class: 'btn', id: 'alloc-btn', hidden: true, onclick: () => act(() => allocationDialog({ circleId, done: load })) }, icon('swap', 16), 'Répartition selon la garde'),
     h('button', { class: 'btn', onclick: () => settlementForm({ circleId, done: load }) }, icon('swap', 16), 'Remboursement'),
     h('button', { class: 'btn primary', onclick: () => expenseForm({ circleId, done: load }) }, icon('plus', 16), 'Dépense'))),
     unassignedBox, chips, filterBar, balBox, pendingBox, catBox, trendBox, recBox, listBox);
@@ -330,7 +385,13 @@ export async function budget(root) {
   }
   onRefresh(['expenses', 'recurring-expenses', 'invoices'], load);
 
-  function draw() { drawUnassignedInvoices(); drawBalances(); drawPendingInvoices(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
+  function draw() {
+    // Le bouton n'a de sens que s'il existe des factures du portail déjà payées dans ce cercle.
+    const ab = root.querySelector('#alloc-btn');
+    if (ab) ab.hidden = !invoices.some((i) => i.circle_id === circleId && i.expense_id && i.document_id);
+    drawAll();
+  }
+  function drawAll() { drawUnassignedInvoices(); drawBalances(); drawPendingInvoices(); drawCats(); drawTrend(); drawRecurring(); drawList(); }
 
   // Factures reçues par addon sans cercle deviné (plusieurs cercles existent, aucune indication
   // suffisante) : plutôt que perdues, elles restent ici en attente — visibles des seuls
