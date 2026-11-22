@@ -328,6 +328,11 @@ async function main() {
     const anon = new Client();
     ok(await anon.get('/api/state'));
     ok(await anon.get('/api/me'), 401, 'me sans session');
+    // Un cookie illisible (« % » invalide, posé par une autre appli du même domaine : Authelia, Home
+    // Assistant…) ne doit pas faire tomber tout le site en HTTP 500 — bug observé derrière un domaine partagé.
+    const weirdCookie = await fetch(BASE + '/api/state', { headers: { Cookie: 'autre=%E0%A4%A; mq_session=%zz; ok=1' } });
+    assert.strictEqual(weirdCookie.status, 200, 'cookie mal encodé : la page répond normalement');
+    assert.strictEqual((await fetch(BASE + '/', { headers: { Cookie: 'x=%' } })).status, 200, "idem sur la page d'accueil");
     const noHeader = await fetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     assert.strictEqual(noHeader.status, 403, 'CSRF : en-tête requis');
 

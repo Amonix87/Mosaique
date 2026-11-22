@@ -165,7 +165,14 @@ function parseCookies(req) {
   const out = {};
   for (const part of (req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    // Les cookies d'un même domaine sont partagés par toutes les applis qui s'y trouvent (Authelia,
+    // Home Assistant…) : l'un d'eux peut contenir un « % » invalide. Un cookie illisible est simplement
+    // pris tel quel — il ne doit jamais faire échouer toute requête (HTTP 500 sur tout le site).
+    const raw = part.slice(i + 1).trim();
+    let val = raw;
+    try { val = decodeURIComponent(raw); } catch { /* garder la valeur brute */ }
+    out[part.slice(0, i).trim()] = val;
   }
   return out;
 }
