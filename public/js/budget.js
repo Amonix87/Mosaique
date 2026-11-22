@@ -1,4 +1,4 @@
-import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2, readable } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, formModal, modal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2, readable } from './core.js';
 import { equalSplit, isFull, boundaries, moveBoundary, setShare, fmtPct } from './split.js';
 
 const MONTH_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -195,6 +195,43 @@ function expenseForm({ circleId: initialCircleId, done, expense = null, recurrin
   });
 }
 
+/* ── « Pourquoi X doit Y € à Z ? » : au clic sur une ligne de « Comptes » (par l'une ou l'autre des
+   deux personnes), la liste des dépenses et remboursements dont ce montant est fait — voir
+   GET /expenses/pair-detail. « + » augmente ce que la première personne doit à la seconde, « − » le diminue. ── */
+async function pairDetail({ circleId, from, to, amountCents, done }) {
+  const d = await get(`/expenses/pair-detail?circle_id=${circleId}&from=${from}&to=${to}`);
+  const sign = (c) => `${c >= 0 ? '+' : '−'} ${euro(Math.abs(c))}`;
+  const lineNode = (l) => {
+    if (l.kind === 'settlement') {
+      return h('li', { class: 'expense-row pair-line' },
+        h('span', { class: 'settle-icon' }, icon('swap', 14)),
+        h('div', { class: 'expense-main' }, h('strong', null, `Remboursement de ${userName(l.from_user)} à ${userName(l.to_user)}`),
+          h('small', null, fmtDayY(l.date), l.note ? ` · ${l.note}` : '')),
+        h('strong', { class: l.effect_cents >= 0 ? 'pair-plus' : 'pair-minus' }, sign(l.effect_cents)));
+    }
+    const other = l.paid_by === to ? from : to;
+    const pct = Number(l.split_pct[other]);
+    const child = l.child_id ? childById(l.child_id) : null;
+    return h('li', { class: 'expense-row pair-line' },
+      avatar(l.paid_by, 28),
+      h('div', { class: 'expense-main' }, h('strong', null, l.title),
+        h('small', null, fmtDayY(l.date), ` · payé par ${userName(l.paid_by)} (${euro(l.amount_cents)})`, child ? ` · ${child.name}` : '',
+          ` · part de ${userName(other)} : ${euro(l.share_cents)}`, Number.isFinite(pct) ? ` (${fmtPct(pct)} %)` : '')),
+      h('strong', { class: l.effect_cents >= 0 ? 'pair-plus' : 'pair-minus' }, sign(l.effect_cents)));
+  };
+  const owes = d.net_cents >= 0 ? from : to; const owed = d.net_cents >= 0 ? to : from;
+  const close = modal(`${userName(from)} → ${userName(to)}`, h('div', { class: 'stack' },
+    h('p', null, d.net_cents === 0 ? 'Les comptes sont équilibrés entre ces deux personnes.'
+      : h('span', null, h('strong', null, userName(owes)), ' doit ', h('strong', null, euro(Math.abs(d.net_cents))), ' à ', h('strong', null, userName(owed)), ', pour les raisons suivantes :')),
+    d.lines.length ? h('ul', { class: 'expense-list' }, d.lines.map(lineNode)) : emptyState('Aucune dépense en commun.'),
+    h('p', { class: 'muted pair-legend' }, `« + » : augmente ce que ${userName(from)} doit à ${userName(to)} · « − » : le diminue.`),
+    Math.abs(d.net_cents) !== amountCents
+      ? h('p', { class: 'muted' }, `Le montant proposé dans « Comptes » (${euro(amountCents)}) tient aussi compte des autres membres du cercle : les dettes croisées entre plusieurs personnes sont compensées pour réduire le nombre de remboursements.`) : null,
+    h('div', { class: 'row end gap' },
+      h('button', { class: 'btn', type: 'button', onclick: () => close() }, 'Fermer'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => { close(); settlementForm({ circleId, done, from, to, amountCents }); } }, 'Rembourser'))), { wide: true });
+}
+
 /* ── Attribution d'une facture périscolaire en attente (voir Réglages → Modules complémentaires) :
    à quelqu'un qui va la payer, ou qui l'a déjà payée (ce qui la fait basculer dans l'historique
    comme une dépense ordinaire, partagée à égalité entre les membres du cercle) — et, si on en suit
@@ -364,7 +401,9 @@ export async function budget(root) {
       h('h2', null, 'Comptes'),
       h('p', { class: 'muted filter-summary' }, 'Sur l\'ensemble des dépenses, quels que soient les filtres ci-dessous.'),
       summary.transfers.length ? h('ul', { class: 'balance-list' }, summary.transfers.map((t) => h('li', null,
-        h('span', { class: 'row gap center' }, avatar(t.from, 22), h('span', null, userName(t.from)), '→', avatar(t.to, 22), h('span', null, userName(t.to))),
+        h('button', { class: 'pair-btn row gap center', type: 'button', title: 'Voir pourquoi', 'aria-label': `Voir pourquoi ${userName(t.from)} doit ${euro(t.amount_cents)} à ${userName(t.to)}`,
+          onclick: () => act(() => pairDetail({ circleId, from: t.from, to: t.to, amountCents: t.amount_cents, done: load })) },
+        avatar(t.from, 22), h('span', null, userName(t.from)), '→', avatar(t.to, 22), h('span', null, userName(t.to)), h('small', { class: 'muted' }, 'Détail')),
         h('strong', null, euro(t.amount_cents)),
         h('button', { class: 'btn small', onclick: () => settlementForm({ circleId, done: load, from: t.from, to: t.to, amountCents: t.amount_cents }) }, 'Rembourser'))))
         : emptyState('Tous les comptes sont équilibrés.'),

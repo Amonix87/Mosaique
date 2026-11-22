@@ -240,6 +240,8 @@ avancement s'affiche dans Réglages pendant ce temps, et vous pouvez naviguer ai
 sans l'interrompre. Les passages suivants ne récupèrent plus que les nouveautés et sont quasi
 instantanés.
 
+**Pas de doublons entre le planning et l'historique.** Une même prestation peut arriver par ces deux chemins (le planning donne les horaires, l'historique des demandes n'en donne pas). Quand l'enfant, le jour et l'intitulé sont les mêmes (sans tenir compte des majuscules ni des espaces en trop), Mosaïque ne garde que la ligne du planning, avec ses horaires — quel que soit l'ordre d'arrivée, et les éventuels doublons déjà présents sont nettoyés au démarrage du serveur. Les anciennes dates que le planning ne couvre plus gardent leur unique ligne d'historique, sans horaire.
+
 Vos identifiants sont alors conservés dans la base de Mosaïque (comme l'est déjà, par exemple, le
 mot de passe du serveur SMTP) — jamais transmis ailleurs qu'au portail concerné. Si vous préférez
 ne pas les lui confier, le point d'entrée manuel ci-dessous reste disponible.
@@ -276,8 +278,12 @@ Les factures importées n'apparaissent pas dans École, mais directement dans **
 « factures en attente » : elles n'entrent pas encore dans les comptes (qui doit combien à qui), tant
 qu'elles ne sont pas attribuées à quelqu'un. Pour chacune, on choisit qui la règle, soit simplement
 pour l'instant (« va payer » — elle reste en attente, réattribuable), soit en cochant « déjà payée »,
-ce qui crée aussitôt une vraie dépense partagée à égalité entre les membres du cercle et fait sortir
-la facture de la liste d'attente. Supprimer cette dépense depuis Budget (comme n'importe quelle
+ce qui crée aussitôt une vraie dépense et fait sortir la facture de la liste d'attente. Elle est
+partagée à égalité entre les **parents désignés de l'enfant** concerné (Famille → Enfants), comme le
+prix d'un événement — donc, en garde alternée, seulement entre vous et l'autre parent, pas avec les
+autres membres du cercle (beaux-parents…). Sans enfant rattaché, ou sans parents désignés, elle reste
+partagée entre tout le cercle. Changer l'enfant d'une facture déjà payée met aussi à jour le partage
+de sa dépense ; le partage reste modifiable ensuite depuis Budget. Supprimer cette dépense depuis Budget (comme n'importe quelle
 dépense) la fait réapparaître en attente, toujours attribuée à la même personne.
 
 Une facture en attente peut aussi se voir attribuer un **enfant** (si vous en suivez plusieurs à
@@ -384,6 +390,8 @@ Le champ de recherche en haut de l'Agenda cherche dans **tout le calendrier**, p
 ## Filtres du Budget
 
 Sous les cercles, une **période** (par mois, par année, ou toute la période) et une **catégorie** filtrent le détail par catégorie et l'historique, qui indique le nombre de dépenses et leur total. Cliquer une catégorie dans le détail filtre aussi l'historique. Les lignes de remboursement n'ont pas de catégorie : elles disparaissent quand une catégorie est choisie. Les **comptes** (qui doit combien à qui) portent toujours sur l'ensemble des dépenses, quels que soient les filtres — sinon ils indiqueraient un solde faux. Par défaut, le mois courant est affiché.
+
+**Pourquoi dois-je ce montant ?** Dans « Comptes », cliquer sur une ligne (« Alice → Bob », par celle qui doit comme par celui à qui on doit) ouvre le détail : chaque dépense payée par l'un où l'autre a une part (avec le total, qui l'a payée, la part et son pourcentage), les dépenses dans l'autre sens, et les remboursements déjà enregistrés, avec leur effet (« + » augmente la dette, « − » la réduit) et le total. S'il y a plus de deux personnes dans le cercle, le montant proposé peut compenser des dettes croisées avec d'autres membres : une note l'indique alors. Un bouton permet d'enregistrer le remboursement depuis cette fenêtre.
 
 ## Documents : filtres et aperçu sans téléchargement
 

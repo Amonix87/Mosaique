@@ -1330,6 +1330,21 @@ async function main() {
     ]);
     assert.deepStrictEqual(resaBatch.body.results.map((r) => r.ok), [true, true, false], 'lot mixte réservations : succès, succès, enfant introuvable');
     assert.strictEqual(resaBatch.body.results[0].updated, true, "l'import réutilise le même external_id (pas de doublon)");
+    // Même prestation reçue par le planning (avec horaires) ET par l'historique des demandes (sans
+    // horaire, autre source) : une seule ligne, celle du planning, quel que soit l'ordre d'arrivée.
+    await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'Accueil du soir', date: '2026-11-17', start_time: '16:30', end_time: '18:30', source: 'eportail', external_id: 'plan-d1' });
+    await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'ACCUEIL  du soir ', date: '2026-11-17', source: 'eportail_demande', external_id: 'D1-2026-11-17', status: 'RESERVATION_OK' });
+    let dup1 = (await alice.get('/api/reservations')).body.filter((r) => r.child_id === kid1 && r.date === '2026-11-17');
+    assert.strictEqual(dup1.length, 1, "planning puis historique : pas de doublon");
+    assert.strictEqual(dup1[0].start_time, '16:30', 'la ligne conservée est celle du planning, avec ses horaires');
+    await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'Accueil du matin', date: '2026-11-18', source: 'eportail_demande', external_id: 'D2-2026-11-18' });
+    assert.strictEqual((await alice.get('/api/reservations')).body.filter((r) => r.child_id === kid1 && r.date === '2026-11-18').length, 1, "historique seul (hors planning) : conservé");
+    await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'Accueil du matin', date: '2026-11-18', start_time: '07:30', end_time: '08:30', source: 'eportail', external_id: 'plan-d2' });
+    dup1 = (await alice.get('/api/reservations')).body.filter((r) => r.child_id === kid1 && r.date === '2026-11-18');
+    assert.strictEqual(dup1.length, 1, "historique puis planning : le planning remplace la ligne d'historique");
+    assert.strictEqual(dup1[0].start_time, '07:30');
+    await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'Cantine', date: '2026-11-18', source: 'eportail_demande', external_id: 'D3-2026-11-18' });
+    assert.strictEqual((await alice.get('/api/reservations')).body.filter((r) => r.child_id === kid1 && r.date === '2026-11-18').length, 2, "un intitulé différent le même jour n'est pas un doublon");
     ok(await anon.call('POST', `/import/${schoolToken}/reservation`, { child: 'Léo', title: 'x', date: 'pas une date' }), 200, 'date invalide : réponse 200 avec erreur dans le résultat');
     const resaForBob = (await bob.get('/api/reservations')).body;
     assert.ok(resaForBob.some((r) => r.child_id === kid1 && r.status === 'annulée'), 'Bob voit la réservation de Léo, mise à jour');
@@ -1408,6 +1423,37 @@ async function main() {
     const revived = (await bob.get('/api/invoices')).body.find((i) => i.id === fac1.id);
     assert.strictEqual(revived.expense_id, null, 'supprimer la dépense redonne automatiquement la facture en attente');
     assert.strictEqual(revived.assigned_to, C, 'toujours attribuée à Carla, juste de nouveau non payée');
+
+    // Facture rattachée à un enfant : seuls SES parents désignés se la partagent (bug observé : tout le
+    // cercle — beaux-parents compris — « devait » rembourser celui qui avait payé, alors que seul
+    // l'autre parent est concerné).
+    const kidBatch = await anon.call('POST', `/import/${schoolToken}/facture`, { label: 'Cantine décembre', number: 'F-KID-1', date: '2026-12-01', amount: 30, circle_id: circle, external_id: 'eportail-kid1' });
+    const kidInvId = kidBatch.body.results[0].id;
+    ok(await bob.put(`/api/invoices/${kidInvId}/attribute`, { child_id: kid1 }), 200, 'facture rattachée à Léo (parents : Alice et Bob)');
+    const kidPaid = (await bob.put(`/api/invoices/${kidInvId}/assign`, { assigned_to: B, paid: true, date: '2026-12-02' })).body;
+    const kidExp = (await alice.get('/api/expenses')).body.find((e) => e.id === kidPaid.expense_id);
+    assert.deepStrictEqual(Object.keys(kidExp.split).map(Number).sort((x, y) => x - y), [A, B].sort((x, y) => x - y), "partagée entre les seuls parents de Léo, pas tout le cercle");
+    const kidBalances = (await alice.get(`/api/expenses/summary?circle_id=${circle}`)).body.balances;
+    assert.ok(!(C in kidBalances) || kidBalances[C] === 0 || !Object.keys(kidExp.split).includes(String(C)), "Carla (hors parents de Léo) n'est concernée par aucune part de cette facture");
+    // « Pourquoi dois-je X € ? » : détail ligne par ligne, lisible par l'une ou l'autre des deux personnes.
+    const pd = (await alice.get(`/api/expenses/pair-detail?circle_id=${circle}&from=${A}&to=${B}`)).body;
+    const pdLine = pd.lines.find((l) => l.id === kidPaid.expense_id);
+    assert.ok(pdLine, "la facture de Léo figure dans le détail Alice → Bob");
+    assert.strictEqual(pdLine.effect_cents, 1500, 'Bob a payé 30 € pour Léo, Alice y a 50 % : elle lui doit 15 €');
+    assert.strictEqual(pdLine.share_cents, 1500);
+    assert.strictEqual(pd.net_cents, pd.lines.reduce((a, l) => a + l.effect_cents, 0), 'net = somme des lignes');
+    const pdRev = (await bob.get(`/api/expenses/pair-detail?circle_id=${circle}&from=${B}&to=${A}`)).body;
+    assert.strictEqual(pdRev.net_cents, -pd.net_cents, 'la vue inverse (celle de Bob) donne exactement le contraire');
+    assert.strictEqual(pdRev.lines.find((l) => l.id === kidPaid.expense_id).effect_cents, -1500);
+    assert.ok(!(await alice.get(`/api/expenses/pair-detail?circle_id=${circle}&from=${A}&to=${C}`)).body.lines.some((l) => l.id === kidPaid.expense_id), "Carla n'a aucune part dans la facture de Léo : absente du détail Alice ↔ Carla");
+    ok(await alice.get(`/api/expenses/pair-detail?circle_id=${circle}&from=${A}&to=${A}`), 400, 'deux personnes différentes requises');
+    ok(await alice.get(`/api/expenses/pair-detail?circle_id=${circle}&from=${A}&to=999999`), 400, 'les deux doivent être membres du cercle');
+    // Changer l'enfant d'une facture déjà payée répercute enfant ET partage sur la dépense.
+    ok(await bob.put(`/api/invoices/${kidInvId}/attribute`, { child_id: kid2 }), 200, 'la facture est en fait pour Mia (parents : Alice et Carla)');
+    const kidExp2 = (await alice.get('/api/expenses')).body.find((e) => e.id === kidPaid.expense_id);
+    assert.strictEqual(kidExp2.child_id, kid2, "l'enfant est répercuté sur la dépense déjà créée");
+    assert.deepStrictEqual(Object.keys(kidExp2.split).map(Number).sort((x, y) => x - y), [A, C].sort((x, y) => x - y), 'et le partage suit les parents de Mia');
+    ok(await bob.del(`/api/expenses/${kidPaid.expense_id}`), 200, 'nettoyage');
 
     // Addons de réservation périscolaire (Réglages → Administration → « Modules complémentaires ») :
     // configuration admin-only, mot de passe jamais renvoyé en clair, synchronisation déclenchée manuellement.

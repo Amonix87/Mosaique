@@ -424,3 +424,12 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .link-btn { background: none; border: none; color: var(--ink-soft); text-decoration: underline; cursor: pointer; padding: .5rem; font-size: .85rem; align-self: center; }
 .link-btn:hover { color: var(--ink); }
 dialog.modal.sheet .btn.primary { width: 100%; justify-content: center; padding: .7rem 1rem; }
+
+/* Budget → « Comptes » : la paire de personnes est cliquable pour voir le détail du montant dû. */
+.pair-btn { background: none; border: none; color: inherit; font: inherit; cursor: pointer; padding: .2rem .3rem; margin: -.2rem -.3rem; border-radius: var(--radius-sm); flex: 1 1 auto; text-align: left; }
+.pair-btn:hover, .pair-btn:focus-visible { background: var(--line); }
+.pair-btn small { margin-left: auto; text-decoration: underline; }
+.pair-line small { display: block; }
+.pair-plus { color: var(--danger); white-space: nowrap; }
+.pair-minus { color: var(--moss); white-space: nowrap; }
+.pair-legend { font-size: .85rem; margin: 0; }

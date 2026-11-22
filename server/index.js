@@ -892,12 +892,14 @@ function dropExpenseDocument(row) {
 // Prix d'un événement → dépense dans Budget. Les personnes qui se la partagent : les parents désignés
 // du premier enfant concerné s'il en a, sinon tout le cercle. Celui qui renseigne le prix est le payeur
 // par défaut ; le partage et le payeur restent modifiables ensuite depuis Budget (par ce même créateur).
-function participantsForEvent(ev) {
-  const members = circleMemberIds(ev.circle_id);
-  const childId = parseJ(ev.child_ids, [])[0];
+function participantsForChild(circleId, childId) {
+  const members = circleMemberIds(circleId);
   const child = childId ? db.prepare('SELECT * FROM children WHERE id=?').get(childId) : null;
   const parents = child ? parseJ(child.parent_ids, []).filter((id) => members.includes(id)) : [];
   return parents.length ? parents : members;
+}
+function participantsForEvent(ev) {
+  return participantsForChild(ev.circle_id, parseJ(ev.child_ids, [])[0]);
 }
 function createExpenseForEvent(ev, userId) {
   const childId = parseJ(ev.child_ids, [])[0] ?? null;
@@ -934,14 +936,17 @@ function syncEventExpense(before, after, userId) {
 }
 
 // Facture périscolaire (reçue par addon, voir applyAddonResult) → dépense partagée dans Budget,
-// une fois attribuée à la personne qui l'a payée. Partage égal entre tout le cercle. Si la facture a
-// été rattachée à un enfant (child_id — utile dès qu'on en suit plusieurs), la dépense créée reprend
-// le même enfant. Tant que ce n'est pas fait, la facture reste « en attente » (voir
+// une fois attribuée à la personne qui l'a payée. Partage égal entre les parents désignés de l'enfant
+// concerné (comme pour le prix d'un événement : voir participantsForChild), et seulement à défaut
+// d'enfant ou de parents désignés entre tout le cercle — sinon, dans un cercle élargi, les beaux-parents
+// et autres membres se retrouveraient à « devoir » une part d'une facture qui ne les concerne pas. Si la
+// facture a été rattachée à un enfant (child_id — utile dès qu'on en suit plusieurs), la dépense créée
+// reprend le même enfant. Tant que ce n'est pas fait, la facture reste « en attente » (voir
 // /invoices/:id/assign) et n'entre pas dans les comptes.
 function createExpenseForInvoice(inv, payerId, date, userId) {
   const members = circleMemberIds(inv.circle_id);
   const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(equalSplit(members)), inv.child_id || null, userId);
+    .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(equalSplit(participantsForChild(inv.circle_id, inv.child_id))), inv.child_id || null, userId);
   db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
   emitTo(members, { type: 'refresh', what: 'expenses' });
   return r.lastInsertRowid;
@@ -1464,6 +1469,13 @@ api.put('/invoices/:id/attribute', (req, res) => {
     }
   }
   db.prepare("UPDATE invoices SET circle_id=?, child_id=?, updated_at=datetime('now') WHERE id=?").run(circleId, childId, row.id);
+  // Facture déjà payée (donc déjà dans Budget) : changer l'enfant répercute enfant ET partage sur la
+  // dépense, comme pour un événement (voir syncEventExpense) — les parents de l'enfant ne sont plus les mêmes.
+  if (row.expense_id && circleId === row.circle_id && childId !== row.child_id) {
+    db.prepare('UPDATE expenses SET child_id=?, split=? WHERE id=?')
+      .run(childId, JSON.stringify(equalSplit(participantsForChild(circleId, childId))), row.expense_id);
+    emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'expenses' });
+  }
   if (circleId) emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'invoices' });
   res.json(db.prepare('SELECT * FROM invoices WHERE id=?').get(row.id));
 });
@@ -1656,6 +1668,39 @@ api.get('/expenses/summary', (req, res) => {
     WHERE circle_id=? AND ${scope} AND ${PENDING_EVENT_EXPENSE_SQL} GROUP BY COALESCE(category,'Autre') ORDER BY total DESC`).all(cid, ...arg, nowLocal());
   const settlements = db.prepare('SELECT * FROM settlements WHERE circle_id=? ORDER BY date DESC, id DESC').all(cid);
   res.json({ ...computeBalances(cid), categories: cats, month, period, settlements });
+});
+
+// « Pourquoi X doit-il Y euros à Z ? » : le détail, ligne par ligne, de ce qui existe entre ces deux
+// personnes dans le cercle — chaque dépense payée par l'une où l'autre a une part (+ ce que `from` doit
+// à `to`), les dépenses dans l'autre sens (−), et les remboursements déjà faits. net_cents = ce que
+// `from` doit à `to` (négatif : c'est l'inverse). Il est calculé avec les mêmes dépenses et les mêmes
+// arrondis que les soldes (computeBalances) ; dans un cercle à plus de deux personnes, le montant du
+// « qui rembourse qui » peut en plus compenser des dettes avec d'autres membres — transfer_cents donne
+// le montant réellement proposé entre ces deux-là, pour que l'écran puisse l'expliquer.
+// Visible de tout membre du cercle : les dépenses le sont déjà (voir /expenses).
+api.get('/expenses/pair-detail', (req, res) => {
+  const cid = requireMember(req.user, req.query.circle_id);
+  const members = circleMemberIds(cid);
+  const from = Number(req.query.from); const to = Number(req.query.to);
+  if (!members.includes(from) || !members.includes(to) || from === to) throw bad('Deux membres différents du cercle sont attendus.');
+  const lines = [];
+  for (const e of db.prepare(`SELECT * FROM expenses WHERE circle_id=? AND ${PENDING_EVENT_EXPENSE_SQL} ORDER BY date, id`).all(cid, nowLocal())) {
+    const shares = computeShares(e.amount_cents, parseJ(e.split, {}));
+    let effect = 0;
+    if (e.paid_by === to && shares[from]) effect = shares[from];
+    else if (e.paid_by === from && shares[to]) effect = -shares[to];
+    if (!effect) continue;
+    lines.push({ kind: 'expense', id: e.id, date: e.date, title: e.title, category: e.category, amount_cents: e.amount_cents, paid_by: e.paid_by,
+      child_id: e.child_id, share_cents: Math.abs(effect), split_pct: parseJ(e.split, {}), effect_cents: effect });
+  }
+  for (const st of db.prepare('SELECT * FROM settlements WHERE circle_id=? ORDER BY date, id').all(cid)) {
+    if (st.from_user === from && st.to_user === to) lines.push({ kind: 'settlement', id: st.id, date: st.date, note: st.note, amount_cents: st.amount_cents, from_user: st.from_user, to_user: st.to_user, effect_cents: -st.amount_cents });
+    else if (st.from_user === to && st.to_user === from) lines.push({ kind: 'settlement', id: st.id, date: st.date, note: st.note, amount_cents: st.amount_cents, from_user: st.from_user, to_user: st.to_user, effect_cents: st.amount_cents });
+  }
+  lines.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : y.id - x.id));
+  const net = lines.reduce((a, l) => a + l.effect_cents, 0);
+  const t = computeBalances(cid).transfers.find((x) => x.from === from && x.to === to);
+  res.json({ from, to, net_cents: net, transfer_cents: t ? t.amount_cents : 0, lines });
 });
 
 // Une « ligne de remboursement » : X a rendu Y euros à Z (montant libre, donc éventuellement partiel).
@@ -2378,7 +2423,37 @@ function resolveImportCircle(item) {
   const all = db.prepare('SELECT * FROM circles').all();
   return all.length === 1 ? all[0] : null;
 }
+// Une même prestation peut nous arriver par deux chemins qui n'ont aucune clé commune : le planning
+// du portail (source « eportail », avec les horaires) et l'historique des demandes (source
+// « eportail_demande », sans horaire). Quand les deux décrivent la même chose — même enfant, même
+// jour, même intitulé à la casse et aux espaces près — on ne garde que la ligne du planning, plus
+// riche, et on retire celle de l'historique. Les anciennes dates que le planning ne couvre plus
+// gardent leur ligne d'historique unique. Idempotent : peut être rejoué à chaque import ou démarrage.
+const normReservationTitle = (t) => String(t || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function dropHistoryDuplicates(childId, date) {
+  const rows = db.prepare('SELECT id, title, source FROM school_reservations WHERE child_id=? AND date=?').all(childId, date);
+  if (rows.length < 2) return 0;
+  const planned = new Set(rows.filter((r) => r.source !== 'eportail_demande').map((r) => normReservationTitle(r.title)));
+  let n = 0;
+  for (const r of rows) {
+    if (r.source === 'eportail_demande' && planned.has(normReservationTitle(r.title))) {
+      db.prepare('DELETE FROM school_reservations WHERE id=?').run(r.id); n++;
+    }
+  }
+  return n;
+}
+function dedupeAllReservations() {
+  let n = 0;
+  for (const d of db.prepare('SELECT child_id, date FROM school_reservations GROUP BY child_id, date HAVING count(*) > 1').all()) n += dropHistoryDuplicates(d.child_id, d.date);
+  if (n) console.log(`[réservations] ${n} doublon(s) de l'historique supprimé(s) (le planning, avec horaires, est conservé)`);
+  return n;
+}
 function upsertReservation(childId, item) {
+  const res = upsertReservationRaw(childId, item);
+  if (res.ok && item.date) dropHistoryDuplicates(childId, item.date);
+  return res;
+}
+function upsertReservationRaw(childId, item) {
   const title = item && String(item.title || '').trim().slice(0, 200);
   if (!title) return { ok: false, error: 'Titre requis.' };
   if (!item.date || !validDate(item.date)) return { ok: false, error: 'Date invalide.' };
@@ -2829,6 +2904,7 @@ function maybeSendHolidayNotices() {
 if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
   setInterval(tick, 30000);
+  dedupeAllReservations();
   app.listen(port, '0.0.0.0', () => console.log(`Mosaïque écoute sur le port ${port}`));
   startAutoRefresh();
 }
