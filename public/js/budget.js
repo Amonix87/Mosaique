@@ -365,7 +365,7 @@ export async function budget(root) {
           h('div', { class: 'expense-main' }, h('strong', null, inv.label, ` — ${inv.number}`),
             h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '', child ? ` · ${child.name}` : '', ' · ', assignee ? `à payer par ${assignee}` : 'non attribuée')),
           h('strong', null, euro(inv.amount_cents)),
-          inv.document_id ? h('a', { class: 'icon-btn', href: `/api/documents/${inv.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture', title: 'Voir la facture (PDF)' }, icon('doc', 16)) : null,
+          inv.document_id ? h('a', { class: 'icon-btn doc-ok', href: `/api/documents/${inv.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, icon('doc', 16)) : null,
           assignee ? h('button', { class: 'btn small', onclick: () => act(async () => {
             await put(`/invoices/${inv.id}/assign`, { assigned_to: inv.assigned_to, paid: true, date: today() });
             toast('Facture marquée payée'); load();
@@ -459,7 +459,7 @@ export async function budget(root) {
         h('small', null, `${fmtDayY(e.date)} · ${e.category || 'Autre'} · payé par ${userName(e.paid_by)}`, e.child_id && childById(e.child_id) ? ` · ${childById(e.child_id).name}` : '',
           e.recurring_id ? ' · récurrente' : '', e.event_id ? ' · issue d\'un événement' : '')),
       h('strong', null, euro(e.amount_cents)),
-      e.document_id ? h('a', { class: 'icon-btn', href: `/api/documents/${e.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture' }, icon('doc', 16)) : null,
+      e.document_id ? h('a', { class: 'icon-btn doc-ok', href: `/api/documents/${e.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, icon('doc', 16)) : null,
       canModify(e) ? h('button', { class: 'icon-btn', 'aria-label': 'Modifier', onclick: () => expenseForm({ circleId, done: load, expense: e }) }, icon('edit', 16)) : null,
       canModify(e) ? h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer « ${e.title} » ?`)) act(async () => { await del(`/expenses/${e.id}`); load(); }); } }, icon('trash', 16)) : null);
 
