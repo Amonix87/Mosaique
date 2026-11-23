@@ -505,6 +505,8 @@ Une fois installée, l'application s'ouvre en plein écran avec sa propre icône
 
 Lors de l'ajout d'une dépense (Budget), vous pouvez joindre un justificatif au format PDF. Il est automatiquement rangé dans Documents, sous la catégorie « Facture », et reste accessible en un clic depuis la ligne de la dépense elle-même. Remplacer le fichier (en le renvoyant depuis le formulaire d'une nouvelle dépense) retire l'ancien ; supprimer la dépense retire aussi sa facture jointe.
 
+**Supprimer un rendez-vous avec un prix** : s'il est encore à venir, sa dépense (masquée de Budget tant qu'il n'a pas eu lieu) est supprimée avec lui — l'opération est tracée dans l'historique. S'il est déjà passé, l'argent a réellement été dépensé : la dépense reste dans Budget, simplement détachée de l'événement.
+
 ## Historique des modifications (budget et garde)
 
 Les boutons **Historique** de **Budget** et de **Garde** ouvrent le journal de ce qui a été modifié, par qui, quand et comment : chaque ligne indique l'auteur, la date et l'heure, un résumé, et les champs touchés sous la forme *ancienne valeur → nouvelle valeur* (montants en euros, répartitions en noms et pourcentages, personnes par leur nom). On peut filtrer par personne (et par enfant pour la garde) ; le plus récent est en haut, « Voir plus ancien » remonte le temps.

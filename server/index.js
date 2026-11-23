@@ -930,6 +930,19 @@ function createExpenseForEvent(ev, userId) {
   audit.created(userId, 'expense', db.prepare('SELECT * FROM expenses WHERE id=?').get(ins.lastInsertRowid), { via: 'agenda', note: "depuis le prix d'un événement" });
   if (ev.price_paid_by == null) db.prepare('UPDATE events SET price_paid_by=? WHERE id=?').run(payer, ev.id);
 }
+// Supprimer un rendez-vous À VENIR supprime aussi sa dépense : elle n'était pas encore une vraie dépense
+// (masquée de Budget tant que le rendez-vous n'a pas eu lieu, voir PENDING_EVENT_EXPENSE_SQL), et si on
+// la laissait, le détachement (event_id → NULL) la ferait apparaître d'un coup dans le budget. Pour un
+// rendez-vous déjà passé, l'argent a réellement été dépensé : la dépense est conservée, détachée.
+function dropPendingEventExpense(ev, userId) {
+  if (!(ev.price_cents !== null && ev.starts_at > nowLocal())) return;
+  const linked = db.prepare('SELECT * FROM expenses WHERE event_id=?').get(ev.id);
+  if (!linked) return;
+  dropExpenseDocument(linked);
+  db.prepare('DELETE FROM expenses WHERE id=?').run(linked.id);
+  audit.deleted(userId, 'expense', linked, { via: 'agenda', note: 'rendez-vous à venir supprimé' });
+  emitTo(circleMemberIds(ev.circle_id), { type: 'refresh', what: 'expenses' });
+}
 function syncEventExpense(before, after, userId) {
   const linked = db.prepare('SELECT * FROM expenses WHERE event_id=?').get(after.id);
   if (after.price_cents === null) {
@@ -1129,6 +1142,7 @@ mountResource('events', 'events', {
   },
   beforeDelete: (row, req) => {
     if (!editableForChildren(req.user, row.child_ids)) throw new HttpError(403, "Vous n'avez qu'un accès en lecture à un des enfants de cet événement.");
+    dropPendingEventExpense(row, req.user.id);
   },
   validate: (v, req) => {
     if (v.ends_at && v.ends_at < v.starts_at) throw bad("La fin doit être après le début.");
@@ -1179,6 +1193,7 @@ api.post('/events/:id/truncate', (req, res) => {
   if (!validDate(date)) throw bad('Date invalide.');
   const startDate = row.starts_at.slice(0, 10);
   if (date <= startDate) {
+    dropPendingEventExpense(row, req.user.id);
     db.prepare('DELETE FROM events WHERE id=?').run(row.id);
   } else {
     db.prepare('UPDATE events SET repeat_until=? WHERE id=?').run(addDays(date, -1), row.id);

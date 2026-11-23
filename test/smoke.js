@@ -1146,6 +1146,16 @@ async function main() {
     assert.strictEqual(budgetDone.balances[A], (budgetBefore.balances[A] || 0) + 3850, 'et dans les soldes : Alice a payé, 50/50 avec Bob');
     ok(await alice.put(`/api/events/${evF.id}`, { price_cents: null }), 200);
 
+    // Supprimer un rendez-vous à venir (avec prix) supprime aussi sa dépense masquée — elle ne doit pas
+    // réapparaître dans Budget une fois détachée. Un rendez-vous passé, lui, garde sa dépense (voir evQ).
+    const evG = (await alice.post('/api/events', { circle_id: circle, title: 'Rdv supprimé', starts_at: localDT(new Date(Date.now() + 4 * 86400000)), price_cents: 5500, child_ids: [kid1] })).body;
+    const budgetBeforeG = (await alice.get(`/api/expenses/summary?circle_id=${circle}&all=1`)).body;
+    ok(await alice.del(`/api/events/${evG.id}`), 200, 'suppression du rendez-vous à venir');
+    assert.ok(!(await alice.get('/api/expenses')).body.some((e) => e.title === 'Rdv supprimé'), 'sa dépense a disparu avec lui, elle ne réapparaît pas dans Budget');
+    assert.deepStrictEqual((await alice.get(`/api/expenses/summary?circle_id=${circle}&all=1`)).body.balances, budgetBeforeG.balances, 'soldes inchangés');
+    const logG = (await alice.get(`/api/audit?area=budget&circle_id=${circle}&limit=20`)).body.entries.find((e) => e.action === 'delete' && e.summary.includes('Rdv supprimé'));
+    assert.ok(logG && logG.via === 'agenda', 'la suppression de la dépense est tracée dans l\'historique');
+
     // ── Recherche dans l'agenda (passé et à venir) ──
     const searchIds = async (client, q) => (await client.get(`/api/events/search?q=${encodeURIComponent(q)}`)).body;
     const todayIso = localDT(new Date()).slice(0, 10);
