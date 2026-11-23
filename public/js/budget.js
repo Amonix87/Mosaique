@@ -1,5 +1,6 @@
 import { h, icon, state, get, post, put, del, act, toast, formModal, modal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2, readable } from './core.js';
 import { historyButton } from './audit.js';
+import { viewerLink } from './viewer.js';
 import { equalSplit, isFull, boundaries, moveBoundary, setShare, fmtPct } from './split.js';
 
 const MONTH_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -348,6 +349,11 @@ function settlementForm({ circleId, done, from = null, to = null, amountCents = 
   });
 }
 
+// Spécification de la visionneuse pour la facture PDF d'un document (voir public/js/viewer.js).
+const invoiceViewer = (documentId, title) => ({
+  url: `/api/documents/${documentId}/file?inline=1`, downloadUrl: `/api/documents/${documentId}/file`, title: title || 'Facture', filename: 'facture.pdf', isPdf: true,
+});
+
 export async function budget(root) {
   const circles = myCircles();
   if (!circles.length) { append(root, pageHead('Budget'), emptyState('Aucun cercle disponible.')); return; }
@@ -428,7 +434,7 @@ export async function budget(root) {
           h('div', { class: 'expense-main' }, h('strong', null, inv.label, ` — ${inv.number}`),
             h('small', null, fmtDayY(inv.date), inv.due_date ? ` · échéance ${fmtDayY(inv.due_date)}` : '', child ? ` · ${child.name}` : '', ' · ', assignee ? `à payer par ${assignee}` : 'non attribuée')),
           h('strong', null, euro(inv.amount_cents)),
-          inv.document_id ? h('a', { class: 'icon-btn doc-ok', href: `/api/documents/${inv.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, icon('doc', 16)) : null,
+          inv.document_id ? viewerLink({ class: 'icon-btn doc-ok', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, invoiceViewer(inv.document_id, inv.label), icon('doc', 16)) : null,
           assignee ? h('button', { class: 'btn small', onclick: () => act(async () => {
             await put(`/invoices/${inv.id}/assign`, { assigned_to: inv.assigned_to, paid: true, date: today() });
             toast('Facture marquée payée'); load();
@@ -522,7 +528,7 @@ export async function budget(root) {
         h('small', null, `${fmtDayY(e.date)} · ${e.category || 'Autre'} · payé par ${userName(e.paid_by)}`, e.child_id && childById(e.child_id) ? ` · ${childById(e.child_id).name}` : '',
           e.recurring_id ? ' · récurrente' : '', e.event_id ? ' · issue d\'un événement' : '')),
       h('strong', null, euro(e.amount_cents)),
-      e.document_id ? h('a', { class: 'icon-btn doc-ok', href: `/api/documents/${e.document_id}/file?inline=1`, target: '_blank', rel: 'noopener', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, icon('doc', 16)) : null,
+      e.document_id ? viewerLink({ class: 'icon-btn doc-ok', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, invoiceViewer(e.document_id, e.title), icon('doc', 16)) : null,
       canModify(e) ? h('button', { class: 'icon-btn', 'aria-label': 'Modifier', onclick: () => expenseForm({ circleId, done: load, expense: e }) }, icon('edit', 16)) : null,
       canModify(e) ? h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer « ${e.title} » ?`)) act(async () => { await del(`/expenses/${e.id}`); load(); }); } }, icon('trash', 16)) : null);
 

@@ -502,6 +502,10 @@ Mosaïque n'est pas disponible sur l'App Store ou le Play Store — développer 
 
 Une fois installée, l'application s'ouvre en plein écran avec sa propre icône, exactement comme une application native, et se recharge plus vite grâce à un cache local léger (qui ne concerne que l'habillage de l'application — vos données restent toujours à jour, jamais mises en cache). L'icône a un fond crème plutôt que transparent : iOS remplit de toute façon les zones transparentes d'une icône d'écran d'accueil, généralement en noir, donc autant choisir la couleur nous-mêmes.
 
+## Visionneuse de PDF et d'images
+
+Un PDF (facture jointe à une dépense, document) ou une image s'ouvre dans une **visionneuse plein écran** avec un bouton **Fermer** toujours visible, un zoom (− / +) et un bouton de téléchargement. Sur iPhone, l'application installée sur l'écran d'accueil n'a ni barre d'adresse ni bouton retour : un PDF ouvert dans un « nouvel onglet » n'offrait aucun moyen de revenir. Les pages sont dessinées par [pdf.js](https://github.com/mozilla/pdf.js) (Apache-2.0), embarqué dans `public/vendor/pdfjs/` — la politique de sécurité n'autorise aucun script externe — et chargé uniquement à la première ouverture d'un PDF (environ 1,8 Mo, mis en cache ensuite par le navigateur). Sur ordinateur, un clic avec Ctrl/Cmd (ou le clic du milieu) ouvre toujours le PDF dans un onglet.
+
 ## Facture jointe à une dépense
 
 Lors de l'ajout d'une dépense (Budget), vous pouvez joindre un justificatif au format PDF. Il est automatiquement rangé dans Documents, sous la catégorie « Facture », et reste accessible en un clic depuis la ligne de la dépense elle-même. Remplacer le fichier (en le renvoyant depuis le formulaire d'une nouvelle dépense) retire l'ancien ; supprimer la dépense retire aussi sa facture jointe.

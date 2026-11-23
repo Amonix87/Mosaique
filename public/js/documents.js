@@ -1,4 +1,5 @@
 import { h, icon, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, circleChips, inFilter, inFilterIds, emptyState, fmtDayY, userName, activeCircleId, circleSelectOptions, myCircles, circleById, fileSize, childById, state, mount, append, myEditableChildren, addressField, modal, periodFilter } from './core.js';
+import { viewerLink } from './viewer.js';
 
 const DOC_CATS = ['Santé', 'École', 'Administratif', 'Justice', 'Autre'];
 
@@ -27,17 +28,10 @@ function docForm(done) {
 const previewable = (d) => /\.(pdf|png|jpe?g|gif|webp)$/i.test(d.filename);
 const inlineUrl = (d) => `/api/documents/${d.id}/file?inline=1`;
 const downloadUrl = (d) => `/api/documents/${d.id}/file`;
-// Sur téléphone/tablette, un PDF incrusté s'affiche mal (première page seule, pas de défilement) :
-// mieux vaut l'ouvrir dans le lecteur du navigateur, dans un nouvel onglet.
-const wantsModalPreview = () => !window.matchMedia('(max-width: 720px), (pointer: coarse)').matches;
-function previewDocument(d) {
-  const isPdf = /\.pdf$/i.test(d.filename);
-  modal(d.title, h('div', { class: 'doc-preview' },
-    isPdf ? h('iframe', { src: inlineUrl(d), title: d.title }) : h('img', { src: inlineUrl(d), alt: d.title }),
-    h('div', { class: 'row gap wrap end' },
-      h('a', { class: 'btn', href: inlineUrl(d), target: '_blank', rel: 'noopener' }, icon('eye', 16), 'Ouvrir dans un onglet'),
-      h('a', { class: 'btn', href: downloadUrl(d), download: d.filename }, icon('download', 16), 'Télécharger'))), { xl: true });
-}
+// Aperçu dans la visionneuse de l'appli (voir public/js/viewer.js) : plein écran, bouton « Fermer » toujours
+// visible, PDF multi-pages même sur iPhone — un onglet ne laisserait aucun moyen de revenir dans l'appli
+// installée sur l'écran d'accueil.
+const viewerSpec = (d) => ({ url: inlineUrl(d), downloadUrl: downloadUrl(d), title: d.title, filename: d.filename, isPdf: /\.pdf$/i.test(d.filename) });
 
 export async function documents(root) {
   let docs = [];
@@ -74,13 +68,11 @@ export async function documents(root) {
       h('ul', { class: 'doc-list' }, visible.filter((d) => (d.category || 'Autre') === cat).map((d) => h('li', { class: 'doc-row' },
         icon('doc', 22),
         previewable(d)
-          ? h('a', { class: 'doc-main', href: inlineUrl(d), target: '_blank', rel: 'noopener', title: 'Afficher',
-            onclick: (e) => { if (wantsModalPreview()) { e.preventDefault(); previewDocument(d); } } },
+          ? viewerLink({ class: 'doc-main', title: 'Afficher' }, viewerSpec(d),
           h('strong', null, d.title), h('small', null, `${fileSize(d.size)} · ajouté par ${userName(d.created_by)} · ${fmtDayY(d.created_at)}`))
           : h('a', { class: 'doc-main', href: downloadUrl(d) },
             h('strong', null, d.title), h('small', null, `${fileSize(d.size)} · ajouté par ${userName(d.created_by)} · ${fmtDayY(d.created_at)}`)),
-        previewable(d) ? h('a', { class: 'icon-btn', href: inlineUrl(d), target: '_blank', rel: 'noopener', 'aria-label': 'Afficher',
-          onclick: (e) => { if (wantsModalPreview()) { e.preventDefault(); previewDocument(d); } } }, icon('eye', 18)) : null,
+        previewable(d) ? viewerLink({ class: 'icon-btn', 'aria-label': 'Afficher' }, viewerSpec(d), icon('eye', 18)) : null,
         h('a', { class: 'icon-btn', href: downloadUrl(d), download: d.filename, 'aria-label': 'Télécharger' }, icon('download', 18)),
         h('button', { class: 'icon-btn', 'aria-label': 'Supprimer', onclick: async () => { if (await confirmBox(`Supprimer « ${d.title} » ?`)) act(async () => { await del(`/documents/${d.id}`); load(); }); } }, icon('trash', 18))))))) :
       emptyState(filtered && inCircle.length ? 'Aucun document ne correspond à ces filtres.' : 'Aucun document pour le moment.'));

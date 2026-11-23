@@ -1804,6 +1804,15 @@ async function main() {
       console.log("✔ Journal d'audit (budget, garde, droits, ajout seul) vérifié");
     }
 
+    // Visionneuse PDF (public/js/viewer.js) : pdf.js est servi par l'application elle-même (la CSP interdit
+    // tout script externe) avec un type MIME JavaScript, y compris son worker, sans connexion préalable.
+    for (const f of ['pdf.min.mjs', 'pdf.worker.min.mjs']) {
+      const r = await anon.call('GET', `/vendor/pdfjs/${f}`);
+      ok(r, 200, `${f} servi`);
+      assert.ok(/javascript/.test(r.headers.get('content-type') || ''), `${f} : type MIME JavaScript (reçu ${r.headers.get('content-type')})`);
+    }
+    assert.ok(/script-src 'self'/.test((await anon.call('GET', '/vendor/pdfjs/pdf.min.mjs')).headers.get('content-security-policy') || ''), 'la CSP reste stricte');
+
     // Installabilité PWA (icône sur l'écran d'accueil, ouverture en plein écran)
     const manifestRes = await fetch(`${BASE}/manifest.webmanifest`);
     assert.strictEqual(manifestRes.status, 200);
