@@ -244,6 +244,28 @@ function testEportailHistoryParsing() {
   const refused = _parseDemandeDetail(detailHtml('Refusé', '02/10/2026', '02/10/2026'), 741052917);
   assert.deepStrictEqual(refused, [], 'une demande refusée ne doit jamais remonter comme réservation');
 
+  // Classement des réservations du portail : le mercredi (matin / après-midi) n'était pas reconnu, et
+  // « MERCREDI APRES MIDI » passait pour un repas à cause du mot « midi » (rappel du jeudi 19 : « seuls les
+  // midis sont réservés » alors que le mercredi l'était en journée).
+  {
+    const { reservationKind, dayLabel, labelText } = require('../server/reservation-kinds');
+    const kind = (title, start_time) => reservationKind({ title, start_time });
+    assert.strictEqual(kind('MERCREDI MATIN'), 'mercredi_matin');
+    assert.strictEqual(kind('MERCREDI APRES MIDI'), 'mercredi_apres_midi');
+    assert.strictEqual(kind('Mercredi après-midi'), 'mercredi_apres_midi');
+    assert.strictEqual(kind('REPAS'), 'cantine');
+    assert.strictEqual(kind('GARDERIE MATIN', '07:30'), 'garderie_matin');
+    assert.strictEqual(kind('GARDERIE SOIR', '16:30'), 'garderie_soir');
+    assert.strictEqual(kind('JOURNEE ALSH - 8h'), 'alsh');
+    assert.strictEqual(dayLabel(['mercredi_matin', 'cantine', 'mercredi_apres_midi']), 'journee', 'mercredi complet = journée complète');
+    assert.strictEqual(dayLabel(['cantine']), 'cantine', 'étiquettes historiques inchangées');
+    assert.strictEqual(dayLabel(['garderie_matin', 'garderie_soir']), 'garderie');
+    assert.strictEqual(dayLabel([]), 'none');
+    assert.strictEqual(labelText(dayLabel(['mercredi_matin', 'cantine'])), 'mercredi matin + cantine');
+    assert.strictEqual(labelText(dayLabel(['mercredi_apres_midi'])), 'mercredi après-midi', "l'après-midi seul n'est plus pris pour la cantine");
+    assert.strictEqual(labelText(dayLabel(['alsh'])), 'ALSH', 'ALSH seul est reconnu (il valait « rien de réservé »)');
+  }
+
   const multiDay = _parseDemandeDetail(detailHtml('Accepté', '20/12/2026', '24/12/2026'), 700000001);
   assert.strictEqual(multiDay.length, 5, 'une demande acceptée sur plusieurs jours → une entrée par jour');
   assert.deepStrictEqual(multiDay.map((r) => r.date), ['2026-12-20', '2026-12-21', '2026-12-22', '2026-12-23', '2026-12-24']);

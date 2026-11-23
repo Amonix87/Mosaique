@@ -311,6 +311,7 @@ suivies, chaque parent concerné reçoit une notification récapitulant la semai
 déjà réservé (cantine, garderie, journée complète...) et, en creux, ce qui ne l'est pas encore — pour
 ne pas découvrir un oubli le lundi matin. Avec une garde partagée, chaque jour part au parent qui a
 l'enfant ce jour-là. Les jours de vacances scolaires sont exclus du récapitulatif.
+Le **mercredi matin** et le **mercredi après-midi** sont reconnus (un mercredi complet — matin, repas et après-midi — compte comme une journée complète) ; ils apparaissent aussi dans le calendrier de l'École, avec leurs propres points de couleur.
 
 Pour les prochaines vacances (ALSH), Mosaïque détecte réellement l'ouverture des réservations plutôt
 que de l'estimer : avant l'ouverture, le portail n'affiche absolument rien pour ces dates (pas même un

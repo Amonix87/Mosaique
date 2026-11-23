@@ -40,6 +40,7 @@ const EVENT_PRICE_REPEAT_MSG = "Un prix ne peut être associé qu'à un événem
 const appUrl = require('./settings');
 const { parseInvoicePdf } = require('./invoice-pdf');
 const audit = require('./audit');
+const { reservationKind, dayLabel, labelText } = require('./reservation-kinds');
 
 const app = express();
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
@@ -3053,16 +3054,7 @@ function childNotifyTargets(childId) {
   const pids = c ? parseJ(c.parent_ids, []) : [];
   return pids.length ? pids : db.prepare('SELECT id FROM users').all().map((u) => u.id);
 }
-// Classement sommaire d'une réservation pour la phrase de résumé ci-dessous — même logique que
-// public/js/ecole.js, dupliquée volontairement ici (petite fonction pure : pas besoin d'un module
-// partagé entre client et serveur pour ça, voir equalSplit/splitEqually pour le même choix).
-function reservationKind(r) {
-  const t = (r.title || '').toLowerCase();
-  if (/cantine|repas|dejeuner|déjeuner|midi/.test(t)) return 'cantine';
-  if (/alsh|loisirs|journee|journée/.test(t)) return 'alsh';
-  if (/garderie|accueil|periscolaire|périscolaire/.test(t)) return (r.start_time && r.start_time < '12:00') ? 'garderie_matin' : 'garderie_soir';
-  return 'autre';
-}
+// Classement des réservations (cantine, garderie, mercredi…) : voir server/reservation-kinds.js.
 
 const WEEKDAY_NAMES = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi'];
 // Les 5 jours ouvrés de la semaine suivant une date de référence (le jeudi d'envoi, concrètement).
@@ -3086,18 +3078,10 @@ const RESA_LIST_LABEL = {
 // Résumé en une phrase (cas simples) ou en liste jour par jour (sinon), pour un sous-ensemble de
 // jours donné — un parent ne voit que les jours où il/elle aura l'enfant la semaine prochaine.
 function summarizeReservationDays(childId, dates) {
-  const labelFor = (d) => {
-    const kinds = new Set(db.prepare('SELECT * FROM school_reservations WHERE child_id=? AND date=?').all(childId, d).map(reservationKind));
-    if (kinds.has('cantine') && (kinds.has('alsh') || (kinds.has('garderie_matin') && kinds.has('garderie_soir')))) return 'journee';
-    if (kinds.has('cantine')) return 'cantine';
-    if (kinds.has('garderie_matin') && kinds.has('garderie_soir')) return 'garderie';
-    if (kinds.has('garderie_matin')) return 'garderie_matin';
-    if (kinds.has('garderie_soir')) return 'garderie_soir';
-    return 'none';
-  };
+  const labelFor = (d) => dayLabel(new Set(db.prepare('SELECT * FROM school_reservations WHERE child_id=? AND date=?').all(childId, d).map(reservationKind)));
   const labels = dates.map(labelFor);
   const dayName = (d) => WEEKDAY_NAMES[(new Date(parseD(d)).getUTCDay() + 6) % 7];
-  if (labels.every((l) => l === labels[0])) return `Actuellement, ${RESA_SENTENCE[labels[0]]}.`;
+  if (labels.every((l) => l === labels[0])) return `Actuellement, ${RESA_SENTENCE[labels[0]] || `réservé tous ces jours : ${labelText(labels[0])}`}.`;
   // Cas fréquent : une base de cantine la plupart des jours, avec un ou deux jours « en plus » réservés
   // en journée complète (ex. le mercredi, sans école l'après-midi) — seul autre motif reconnu en
   // phrase ; toute autre combinaison repart sur la liste jour par jour.
@@ -3106,7 +3090,7 @@ function summarizeReservationDays(childId, dates) {
   if (upgraded.length && base + upgraded.length === labels.length && base >= upgraded.length) {
     return `Actuellement, les midis sont réservés, ainsi que toute la journée du ${upgraded.map(dayName).join(' et du ')}.`;
   }
-  return dates.map((d, i) => `- ${dayName(d)} : ${RESA_LIST_LABEL[labels[i]]}`).join('\n');
+  return dates.map((d, i) => `- ${dayName(d)} : ${RESA_LIST_LABEL[labels[i]] || labelText(labels[i])}`).join('\n');
 }
 
 // Rappel du jeudi soir : pour chaque enfant suivi, qui aura l'enfant chaque jour de la semaine

@@ -5,12 +5,14 @@ import { h, icon, state, get, put, del, act, toast, confirmBox, onRefresh, pageH
 // (ex. « GARDERIE SOIR », « REPAS »...), avec l'horaire en repli pour distinguer matin/soir.
 function reservationKind(r) {
   const t = (r.title || '').toLowerCase();
+  // « MERCREDI APRES MIDI » contient « midi » : à tester avant la cantine (même logique que le serveur).
+  if (/mercredi/.test(t)) return /matin/.test(t) ? 'mercredi_matin' : (/apr[eè]s|midi/.test(t) ? 'mercredi_apres_midi' : 'autre');
   if (/cantine|repas|d[ée]jeuner|midi/.test(t)) return 'cantine';
   if (/alsh|loisirs|journee|journée/.test(t)) return 'alsh';
   if (/garderie|accueil|p[ée]riscolaire/.test(t)) return (r.start_time && r.start_time < '12:00') ? 'garderie_matin' : 'garderie_soir';
   return 'autre';
 }
-const KIND_LABEL = { cantine: 'Cantine', garderie_matin: 'Garderie (matin)', garderie_soir: 'Garderie (soir)', alsh: 'ALSH / journée', autre: 'Autre' };
+const KIND_LABEL = { cantine: 'Cantine', garderie_matin: 'Garderie (matin)', garderie_soir: 'Garderie (soir)', mercredi_matin: 'Mercredi matin', mercredi_apres_midi: 'Mercredi après-midi', alsh: 'ALSH / journée', autre: 'Autre' };
 
 let resaCursor = null; // { y, m } — mois affiché dans le calendrier des réservations, partagé par tous les enfants
 

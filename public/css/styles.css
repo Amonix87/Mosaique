@@ -277,6 +277,8 @@ dialog.modal.sheet { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%;
 .cal-dot.garderie_matin { background: var(--sea); }
 .cal-dot.garderie_soir { background: var(--ring); }
 .cal-dot.alsh { background: var(--moss); }
+.cal-dot.mercredi_matin { background: var(--sea); opacity: .65; }
+.cal-dot.mercredi_apres_midi { background: var(--ring); opacity: .65; }
 .action-bar { position: sticky; bottom: 70px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: .8rem; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: .6rem; z-index: 10; }
 .action-bar[hidden] { display: none; }
 .bar-text { font-size: .92rem; }
