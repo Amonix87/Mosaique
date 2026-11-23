@@ -1,4 +1,5 @@
 import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, opt, onRefresh, pageHead, emptyState, today, ymd, addDays, toDate, daysBetween, fmtDay, fmtDayY, fmtMonth, avatar, userById, childById, userName, readable, ago, mount, append, myEditableChildren, possibleCustodyParents, isoWeek, modal, handoverLocationField } from './core.js';
+import { historyButton } from './audit.js';
 
 let cursor = null;
 const gardeChildren = () => state.children.filter((c) => c.shared_custody);
@@ -58,8 +59,9 @@ export async function garde(root) {
   const swapBox = h('section', { class: 'stack' });
   const holBox = h('section', { class: 'stack' });
 
-  append(root, pageHead('Garde',
-    h('button', { class: 'btn', onclick: () => generatorForm({}, load) }, icon('moon', 16), 'Créer un planning')),
+  append(root, pageHead('Garde', h('div', { class: 'row gap' },
+    historyButton({ area: 'garde' }),
+    h('button', { class: 'btn', onclick: () => generatorForm({}, load) }, icon('moon', 16), 'Créer un planning'))),
   h('div', { class: 'cal-nav' },
     h('button', { class: 'icon-btn', 'aria-label': 'Mois précédent', onclick: () => { cursor.m--; if (cursor.m < 0) { cursor.m = 11; cursor.y--; } clearSel(); load(); } }, icon('left')),
     h('h2', { class: 'cal-title' }, () => null),

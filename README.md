@@ -505,6 +505,20 @@ Une fois installée, l'application s'ouvre en plein écran avec sa propre icône
 
 Lors de l'ajout d'une dépense (Budget), vous pouvez joindre un justificatif au format PDF. Il est automatiquement rangé dans Documents, sous la catégorie « Facture », et reste accessible en un clic depuis la ligne de la dépense elle-même. Remplacer le fichier (en le renvoyant depuis le formulaire d'une nouvelle dépense) retire l'ancien ; supprimer la dépense retire aussi sa facture jointe.
 
+## Historique des modifications (budget et garde)
+
+Les boutons **Historique** de **Budget** et de **Garde** ouvrent le journal de ce qui a été modifié, par qui, quand et comment : chaque ligne indique l'auteur, la date et l'heure, un résumé, et les champs touchés sous la forme *ancienne valeur → nouvelle valeur* (montants en euros, répartitions en noms et pourcentages, personnes par leur nom). On peut filtrer par personne (et par enfant pour la garde) ; le plus récent est en haut, « Voir plus ancien » remonte le temps.
+
+Ce qui est journalisé :
+
+- **Budget** : ajout, modification et suppression d'une dépense, d'une dépense récurrente et d'un remboursement ; facture jointe ou retirée ; facture attribuée, rattachée à un enfant ou supprimée ; répartition appliquée selon la garde. Les dépenses créées par l'agenda (prix d'un événement), par une facture marquée payée ou par l'échéance d'une dépense récurrente y figurent aussi, avec la mention « via l'agenda », « automatique », etc.
+- **Garde** : nuits modifiées (saisie manuelle, génération d'un planning, échange accepté) — **une ligne par enfant**, qui regroupe les nuits par changement (« 12 nuits : 03/12/2026 → 14/12/2026, Marie → Jean-Paul ») ; transition ponctuelle (lieu/heure) ; lieu/heure habituels, parents et garde partagée d'un enfant.
+- Enregistrer sans rien changer, ou remettre la même garde, ne laisse aucune trace. Les synchronisations du portail (factures importées en attente) ne sont pas journalisées : elles ne modifient pas encore les comptes.
+
+Qui voit quoi : le journal du budget est visible par les membres du cercle concerné ; celui de la garde par les personnes qui voient l'enfant (parents désignés, lecteurs, administrateurs — voir *Confidentialité par enfant*). Un administrateur voit aussi les entrées d'un enfant supprimé.
+
+Le journal est **en ajout seul** : des déclencheurs SQL refusent toute modification ou suppression de la table `audit_log`, et elle ne dépend d'aucune autre table — une entrée survit donc à la suppression de la dépense, de l'enfant ou même du compte de son auteur (le nom est recopié au moment de l'écriture, les valeurs aussi). Pour l'API : `GET /api/audit?area=budget&circle_id=…` ou `?area=garde[&child_id=…]`, avec `user_id`, `limit` et `before` (curseur). Seuls les modifications faites **après** la mise à jour sont enregistrées : l'historique antérieur n'est pas reconstituable.
+
 ## Recettes et planificateur de repas (optionnel)
 
 Activable dans Réglages (« Activer les recettes de cuisine »), cette section permet de garder vos recettes de famille, avec une note globale (1 à 5 étoiles) et une note distincte par enfant — pratique pour repérer d'un coup d'œil les plats qui plaisent à tout le monde. Comme le fil familial ou les courses, elle est désactivée par défaut et n'apparaît dans la navigation qu'une fois activée.

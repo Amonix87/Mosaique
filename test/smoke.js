@@ -1666,6 +1666,112 @@ async function main() {
     await new Promise((r) => setTimeout(r, 800));
     assert.strictEqual(pushHits, 0, "l'abonnement expiré a bien été supprimé après le 410, pas de nouvelle tentative");
 
+    // Journal d'audit (Budget et Garde) : qui a modifié quoi, avant → après, en ajout seul.
+    {
+      const BN = bobMe.user.name; // le compte de test de Bob a été renommé plus haut
+      const aud = async (cl, q) => (await cl.get(`/api/audit?${q}`)).body;
+      const budgetLog = async (cl = alice) => (await aud(cl, `area=budget&circle_id=${circle}&limit=100`)).entries;
+      const e1 = (await alice.post('/api/expenses', { circle_id: circle, title: 'Audit cantine', amount_cents: 1000, category: 'Cantine', date: '2031-03-01', paid_by: A, split: { [A]: 50, [B]: 50 } })).body;
+      let log = await budgetLog();
+      const created = log.find((e) => e.entity === 'expense' && e.entity_id === e1.id && e.action === 'create');
+      assert.ok(created, 'la création de la dépense est journalisée');
+      assert.strictEqual(created.user_id, A); assert.strictEqual(created.user_name, 'Alice');
+      assert.ok(/ajoutée/.test(created.summary) && created.summary.includes('Audit cantine') && created.summary.includes('10,00 €'), `résumé lisible : ${created.summary}`);
+      assert.ok(created.changes.some((c) => c.label === 'Montant' && c.to === '10,00 €'), 'valeurs mises en forme (euros)');
+      assert.ok(created.changes.some((c) => c.label === 'Répartition' && /Alice 50 %/.test(c.to) && new RegExp(`${BN} 50 %`).test(c.to)), 'répartition en noms et pourcentages : ' + JSON.stringify(created.changes));
+
+      const before = log.length;
+      ok(await alice.put(`/api/expenses/${e1.id}`, { amount_cents: 1000, title: 'Audit cantine' }), 200, 'enregistrement sans changement');
+      assert.strictEqual((await budgetLog()).length, before, 'aucune ligne de journal si rien n\'a changé');
+      ok(await alice.put(`/api/expenses/${e1.id}`, { amount_cents: 1250, split: { [A]: 70, [B]: 30 }, paid_by: B }), 200);
+      const upd = (await budgetLog()).find((e) => e.entity_id === e1.id && e.action === 'update');
+      assert.ok(upd, 'la modification est journalisée');
+      assert.deepStrictEqual(upd.changes.find((c) => c.label === 'Montant'), { label: 'Montant', from: '10,00 €', to: '12,50 €' });
+      assert.deepStrictEqual(upd.changes.find((c) => c.label === 'Payé par'), { label: 'Payé par', from: 'Alice', to: BN });
+      assert.ok(/70 %/.test(upd.changes.find((c) => c.label === 'Répartition').to));
+      assert.strictEqual(upd.changes.length, 3, 'seuls les champs réellement modifiés figurent');
+
+      const st = (await alice.post('/api/settlements', { circle_id: circle, from_user: A, to_user: B, amount_cents: 777, date: '2031-03-02' }));
+      ok(st, 200);
+      log = await budgetLog();
+      assert.ok(log.some((e) => e.entity === 'settlement' && e.action === 'create' && e.summary.includes(`Alice → ${BN}`) && /7,77 €/.test(e.summary)), 'remboursement journalisé');
+      const stRow = (await alice.get(`/api/expenses/summary?circle_id=${circle}`)).body; // simple appel : le résumé n'écrit rien
+      assert.ok(stRow);
+      ok(await alice.del(`/api/expenses/${e1.id}`), 200);
+      log = await budgetLog();
+      const del1 = log.find((e) => e.entity_id === e1.id && e.action === 'delete');
+      assert.ok(del1 && del1.changes.some((c) => c.label === 'Intitulé' && c.from === 'Audit cantine'), 'la suppression garde le contenu supprimé');
+      assert.ok(log[0].id > log[log.length - 1].id, 'du plus récent au plus ancien');
+
+      // Pagination par curseur.
+      const p1 = await aud(alice, `area=budget&circle_id=${circle}&limit=2`);
+      assert.strictEqual(p1.entries.length, 2); assert.strictEqual(p1.more, true);
+      const p2 = await aud(alice, `area=budget&circle_id=${circle}&limit=2&before=${p1.entries[1].id}`);
+      assert.ok(p2.entries.every((e) => e.id < p1.entries[1].id), 'page suivante strictement plus ancienne');
+      // Filtre par auteur.
+      assert.ok((await aud(alice, `area=budget&circle_id=${circle}&user_id=${B}&limit=100`)).entries.every((e) => e.user_id === B));
+
+      // Droits : un non-membre du cercle, un visiteur, un domaine inconnu.
+      ok(await carla.get(`/api/audit?area=budget&circle_id=${c2}`), 403, "Carla n'est pas membre du cercle Coparents");
+      ok(await anon.get(`/api/audit?area=budget&circle_id=${circle}`), 401, 'connexion requise');
+      ok(await alice.get('/api/audit?area=autre'), 400, 'domaine inconnu');
+      assert.ok((await budgetLog(bob)).some((e) => e.entity_id === e1.id), 'Bob, membre du cercle, voit aussi le journal');
+
+      // Garde : nuits regroupées par changement, par enfant.
+      const gl = async (cl, q = `child_id=${kid1}`) => (await aud(cl, `area=garde&${q}&limit=100`)).entries;
+      ok(await alice.put('/api/custody', { date_from: '2031-03-01', date_to: '2031-03-07', child_ids: [kid1], parent_id: A }));
+      let g = await gl(alice);
+      const first = g.find((e) => e.entity === 'custody' && /01\/03\/2031/.test(e.summary));
+      assert.ok(first, 'saisie de garde journalisée');
+      assert.deepStrictEqual(first.changes, [{ label: '7 nuits : 01/03/2031 → 07/03/2031', from: '—', to: 'Alice' }], 'nuits jusque-là vides → Alice');
+      assert.ok(/saisie manuelle/.test(first.summary) && first.child_id === kid1);
+      const n0 = (await gl(alice)).length;
+      ok(await alice.put('/api/custody', { date_from: '2031-03-01', date_to: '2031-03-07', child_ids: [kid1], parent_id: A }));
+      assert.strictEqual((await gl(alice)).length, n0, 'remettre la même garde ne journalise rien');
+      ok(await alice.put('/api/custody', { date_from: '2031-03-03', date_to: '2031-03-04', child_ids: [kid1], parent_id: B }));
+      ok(await alice.put('/api/custody', { date_from: '2031-03-06', date_to: '2031-03-06', child_ids: [kid1], parent_id: B }));
+      g = await gl(bob);
+      const sw = g.find((e) => e.entity === 'custody' && e.changes.some((c) => c.label.startsWith('2 nuits : 03/03/2031 → 04/03/2031')));
+      assert.ok(sw, 'Bob (parent de Léo) voit le changement');
+      assert.deepStrictEqual([sw.changes[0].from, sw.changes[0].to], ['Alice', BN], 'ancienne → nouvelle personne');
+      assert.strictEqual(sw.user_name, 'Alice');
+      ok(await alice.put('/api/custody', { date_from: '2031-03-08', date_to: '2031-03-10', child_ids: [kid1, kid2], parent_id: A }), 200);
+      assert.strictEqual((await gl(alice, `child_id=${kid2}`)).filter((e) => /08\/03\/2031/.test(e.summary)).length, 1, 'une ligne par enfant');
+      assert.strictEqual((await gl(alice, `child_id=${kid1}`)).filter((e) => /08\/03\/2031/.test(e.summary)).length, 1);
+
+      // Transition ponctuelle : création, modification, suppression.
+      ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2031-03-05', location: 'École', time: '16:30' }));
+      ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2031-03-05', location: 'Gare', time: '16:30' }));
+      ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2031-03-05', location: '', time: '' }));
+      g = (await gl(alice)).filter((e) => e.entity === 'handover');
+      assert.deepStrictEqual(g.slice(0, 3).map((e) => e.action), ['delete', 'update', 'create'], 'créée, modifiée puis supprimée');
+      assert.deepStrictEqual(g[1].changes, [{ label: 'Lieu', from: 'École', to: 'Gare' }], "seul le lieu a changé (l'heure identique n'est pas listée)");
+
+      // Réglages de garde d'un enfant (admin désigne les parents, heure de transition).
+      ok(await alice.put(`/api/children/${kid1}`, { handover_time: '17:45', parent_ids: [A, B] }), 200);
+      g = (await gl(alice)).find((e) => e.entity === 'child' && e.changes.some((c) => c.label.startsWith('Heure')));
+      assert.ok(g && g.changes.find((c) => c.label.startsWith('Heure')).to === '17:45', 'heure de transition habituelle journalisée');
+      assert.ok(!g.changes.some((c) => c.label === 'Parents'), 'parents inchangés : pas listés');
+
+      // Visibilité par enfant : Mia a pour parents Alice et Carla, Bob n\'y a pas accès.
+      ok(await bob.get(`/api/audit?area=garde&child_id=${kid2}`), 403, 'Bob ne voit pas le journal de Mia');
+      assert.ok((await gl(bob, '')).every((e) => e.child_id !== kid2), 'la liste globale de Bob exclut Mia');
+      assert.ok((await gl(alice, '')).some((e) => e.child_id === kid2), 'Alice (admin) voit Mia');
+      assert.ok((await gl(carla, `child_id=${kid2}`)).length > 0, 'Carla, parente de Mia, voit son journal');
+
+      // Générateur de planning : une ligne par enfant, mode indiqué.
+      ok(await alice.post('/api/custody/generate', { pattern: 'alternate_weeks', child_ids: [kid1], parent_a: A, parent_b: B, start: '2032-01-05', end: '2032-01-25' }));
+      assert.ok((await gl(alice)).some((e) => /génération « alternate_weeks »/.test(e.summary)), 'génération journalisée');
+
+      // Ajout seul : ni modification ni suppression, même directement en base.
+      const Database = require('better-sqlite3');
+      const raw = new Database(path.join(dir, 'mosaique.db'));
+      assert.throws(() => raw.prepare("UPDATE audit_log SET summary='truqué'").run(), /ajout seul/, 'modification refusée');
+      assert.throws(() => raw.prepare('DELETE FROM audit_log').run(), /ajout seul/, 'suppression refusée');
+      raw.close();
+      console.log("✔ Journal d'audit (budget, garde, droits, ajout seul) vérifié");
+    }
+
     // Installabilité PWA (icône sur l'écran d'accueil, ouverture en plein écran)
     const manifestRes = await fetch(`${BASE}/manifest.webmanifest`);
     assert.strictEqual(manifestRes.status, 200);

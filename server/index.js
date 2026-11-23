@@ -39,6 +39,7 @@ const EXPENSE_REPEATS = ['weekly', 'monthly', 'quarterly', 'yearly'];
 const EVENT_PRICE_REPEAT_MSG = "Un prix ne peut être associé qu'à un événement qui ne se répète pas (pour un paiement régulier, utilisez une dépense récurrente dans Budget).";
 const appUrl = require('./settings');
 const { parseInvoicePdf } = require('./invoice-pdf');
+const audit = require('./audit');
 
 const app = express();
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
@@ -700,11 +701,13 @@ api.post('/children', (req, res) => {
       handover_location ? String(handover_location).trim().slice(0, 200) : null, handover_time || null,
       blood_type || null, allergies ? String(allergies).trim().slice(0, 1000) : null,
       doctor_name ? String(doctor_name).trim().slice(0, 200) : null, doctor_phone ? String(doctor_phone).trim().slice(0, 50) : null);
+  audit.note(req.user, 'child', { id: r.lastInsertRowid, name: String(name).trim().slice(0, 60) }, 'create', `Enfant ajouté : ${String(name).trim().slice(0, 60)}`, []);
   res.json({ id: r.lastInsertRowid });
 });
 api.put('/children/:id', (req, res) => {
   const { name, color, birthdate, parent_ids, viewer_ids, zone, shared_custody, handover_location, handover_time, blood_type, allergies, doctor_name, doctor_phone } = req.body || {};
   const id = Number(req.params.id);
+  const childBefore = db.prepare('SELECT * FROM children WHERE id=?').get(id);
   if (name !== undefined) db.prepare('UPDATE children SET name=? WHERE id=?').run(String(name).trim().slice(0, 60), id);
   if (color !== undefined && HEX.test(color)) {
     if (colorTakenByAnotherChild(color, id)) throw bad('Cette couleur est déjà utilisée par un autre enfant.');
@@ -749,10 +752,13 @@ api.put('/children/:id', (req, res) => {
   if (doctor_phone !== undefined) {
     db.prepare('UPDATE children SET doctor_phone=? WHERE id=?').run(doctor_phone ? String(doctor_phone).trim().slice(0, 50) : null, id);
   }
+  if (childBefore) audit.updated(req.user, 'child', childBefore, db.prepare('SELECT * FROM children WHERE id=?').get(id));
   res.json({ ok: true });
 });
 api.delete('/children/:id', requireAdmin, (req, res) => {
+  const gone = db.prepare('SELECT * FROM children WHERE id=?').get(Number(req.params.id));
   db.prepare('DELETE FROM children WHERE id=?').run(Number(req.params.id));
+  if (gone) audit.note(req.user, 'child', gone, 'delete', `Enfant supprimé : ${gone.name} (avec toute sa garde)`, []);
   res.json({ ok: true });
 });
 
@@ -830,6 +836,7 @@ function mountResource(name, table, spec, hooks = {}) {
       .run(circleId, ...values, req.user.id);
     const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid);
     if (hooks.afterCreate) hooks.afterCreate(row, req);
+    if (hooks.audit) audit.created(req.user, hooks.audit, row);
     emitTo(circleMemberIds(circleId), { type: 'refresh', what: name });
     res.json(decode(row));
   });
@@ -850,6 +857,7 @@ function mountResource(name, table, spec, hooks = {}) {
     if (sets.length) db.prepare(`UPDATE ${table} SET ${sets.join(',')} WHERE id=?`).run(...vals, row.id);
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(row.id);
     if (hooks.afterUpdate) hooks.afterUpdate(row, updated, req);
+    if (hooks.audit) audit.updated(req.user, hooks.audit, row, updated);
     emitTo(circleMemberIds(updated.circle_id), { type: 'refresh', what: name });
     res.json(decode(updated));
   });
@@ -861,6 +869,7 @@ function mountResource(name, table, spec, hooks = {}) {
     requireMember(req.user, row.circle_id);
     if (hooks.beforeDelete) hooks.beforeDelete(row, req);
     db.prepare(`DELETE FROM ${table} WHERE id=?`).run(row.id);
+    if (hooks.audit) audit.deleted(req.user, hooks.audit, row);
     emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: name });
     res.json({ ok: true });
   });
@@ -915,15 +924,19 @@ function participantsForEvent(ev) {
 function createExpenseForEvent(ev, userId) {
   const childId = parseJ(ev.child_ids, [])[0] ?? null;
   const payer = ev.price_paid_by ?? userId; // le payeur est choisi dans le formulaire ; à défaut, celui qui saisit le prix
-  db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,event_id,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)')
+  const ins = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,event_id,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)')
     .run(ev.circle_id, ev.title, ev.price_cents, EXPENSE_CATEGORY_FOR_EVENT[ev.category] || 'Autre', ev.starts_at.slice(0, 10), payer,
       JSON.stringify(equalSplit(participantsForEvent(ev))), childId, ev.id, userId);
+  audit.created(userId, 'expense', db.prepare('SELECT * FROM expenses WHERE id=?').get(ins.lastInsertRowid), { via: 'agenda', note: "depuis le prix d'un événement" });
   if (ev.price_paid_by == null) db.prepare('UPDATE events SET price_paid_by=? WHERE id=?').run(payer, ev.id);
 }
 function syncEventExpense(before, after, userId) {
   const linked = db.prepare('SELECT * FROM expenses WHERE event_id=?').get(after.id);
   if (after.price_cents === null) {
-    if (linked) { dropExpenseDocument(linked); db.prepare('DELETE FROM expenses WHERE id=?').run(linked.id); }
+    if (linked) {
+      dropExpenseDocument(linked); db.prepare('DELETE FROM expenses WHERE id=?').run(linked.id);
+      audit.deleted(userId, 'expense', linked, { via: 'agenda', note: "prix de l'événement retiré" });
+    }
     if (after.price_paid_by !== null) db.prepare('UPDATE events SET price_paid_by=NULL WHERE id=?').run(after.id);
   } else if (!linked) {
     createExpenseForEvent(after, userId);
@@ -941,7 +954,10 @@ function syncEventExpense(before, after, userId) {
       push('child_id', parseJ(after.child_ids, [])[0] ?? null);
       push('split', JSON.stringify(equalSplit(participantsForEvent(after))));
     }
-    if (sets.length) db.prepare(`UPDATE expenses SET ${sets.join(',')} WHERE id=?`).run(...vals, linked.id);
+    if (sets.length) {
+      db.prepare(`UPDATE expenses SET ${sets.join(',')} WHERE id=?`).run(...vals, linked.id);
+      audit.updated(userId, 'expense', linked, db.prepare('SELECT * FROM expenses WHERE id=?').get(linked.id), { via: 'agenda', note: "suite à la modification de l'événement" });
+    }
   }
   emitTo(circleMemberIds(after.circle_id), { type: 'refresh', what: 'expenses' });
 }
@@ -1039,6 +1055,7 @@ function createExpenseForInvoice(inv, payerId, date, userId) {
   const r = db.prepare('INSERT INTO expenses(circle_id,title,amount_cents,category,date,paid_by,split,child_id,created_by,document_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
     .run(inv.circle_id, `${inv.label} — ${inv.number}`, inv.amount_cents, 'École', date, payerId, JSON.stringify(splitForInvoice(inv)), inv.child_id || null, userId, inv.document_id || null);
   db.prepare('UPDATE invoices SET assigned_to=?, expense_id=? WHERE id=?').run(payerId, r.lastInsertRowid, inv.id);
+  audit.created(userId, 'expense', db.prepare('SELECT * FROM expenses WHERE id=?').get(r.lastInsertRowid), { note: 'depuis une facture du portail, marquée payée' });
   emitTo(members, { type: 'refresh', what: 'expenses' });
   return r.lastInsertRowid;
 }
@@ -1563,6 +1580,7 @@ api.post('/invoices/allocation/apply', (req, res) => {
     if (!wanted.has(r.invoice_id) || !r.changed) continue;
     if (!canModifyOwn(req.user, r._exp)) { refused.push(r.invoice_id); continue; }
     db.prepare('UPDATE expenses SET split=? WHERE id=?').run(JSON.stringify(r.proposed), r.expense_id);
+    audit.updated(req.user, 'expense', r._exp, db.prepare('SELECT * FROM expenses WHERE id=?').get(r.expense_id), { note: 'répartition selon la garde' });
     applied.push(r.invoice_id);
   }
   if (applied.length) emitTo(circleMemberIds(cid), { type: 'refresh', what: 'expenses' });
@@ -1572,8 +1590,11 @@ api.delete('/invoices/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM invoices WHERE id=?').get(Number(req.params.id));
   if (!row) throw new HttpError(404, 'Introuvable.');
   if (!req.user.is_admin) requireMember(req.user, row.circle_id);
+  const exp = row.expense_id ? db.prepare('SELECT * FROM expenses WHERE id=?').get(row.expense_id) : null;
   if (row.expense_id) db.prepare('DELETE FROM expenses WHERE id=?').run(row.expense_id);
   db.prepare('DELETE FROM invoices WHERE id=?').run(row.id);
+  audit.deleted(req.user, 'invoice', row);
+  if (exp) audit.deleted(req.user, 'expense', exp, { note: 'supprimée avec sa facture' });
   if (row.document_id) { // son PDF part avec elle (la dépense, supprimée juste avant, le pointait aussi)
     const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(row.document_id);
     if (doc) { db.prepare('DELETE FROM documents WHERE id=?').run(doc.id); rmFile(doc.stored_name); }
@@ -1610,12 +1631,15 @@ api.put('/invoices/:id/attribute', (req, res) => {
     }
   }
   db.prepare("UPDATE invoices SET circle_id=?, child_id=?, updated_at=datetime('now') WHERE id=?").run(circleId, childId, row.id);
+  audit.updated(req.user, 'invoice', row, { ...row, circle_id: circleId, child_id: childId });
   if (circleId && circleId !== row.circle_id && row.document_id) db.prepare('UPDATE documents SET circle_id=? WHERE id=?').run(circleId, row.document_id);
   // Facture déjà payée (donc déjà dans Budget) : changer l'enfant répercute enfant ET partage sur la
   // dépense, comme pour un événement (voir syncEventExpense) — les parents de l'enfant ne sont plus les mêmes.
   if (row.expense_id && circleId === row.circle_id && childId !== row.child_id) {
+    const expBefore = db.prepare('SELECT * FROM expenses WHERE id=?').get(row.expense_id);
     db.prepare('UPDATE expenses SET child_id=?, split=? WHERE id=?')
       .run(childId, JSON.stringify(splitForInvoice({ ...row, circle_id: circleId, child_id: childId })), row.expense_id);
+    if (expBefore) audit.updated(req.user, 'expense', expBefore, db.prepare('SELECT * FROM expenses WHERE id=?').get(row.expense_id), { note: "suite au changement d'enfant de la facture" });
     emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'expenses' });
   }
   if (circleId) emitTo(circleMemberIds(circleId), { type: 'refresh', what: 'invoices' });
@@ -1639,6 +1663,7 @@ api.put('/invoices/:id/assign', (req, res) => {
     createExpenseForInvoice(row, payerId, date, req.user.id);
   } else {
     db.prepare('UPDATE invoices SET assigned_to=? WHERE id=?').run(payerId, row.id);
+    audit.updated(req.user, 'invoice', row, { ...row, assigned_to: payerId });
     emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'invoices' });
   }
   res.json(db.prepare('SELECT * FROM invoices WHERE id=?').get(row.id));
@@ -1679,6 +1704,7 @@ api.post('/addons/:id/sync', requireAdmin, async (req, res, next) => {
 const PENDING_EVENT_EXPENSE_SQL = '(event_id IS NULL OR event_id NOT IN (SELECT id FROM events WHERE starts_at > ?))';
 const pendingEventIds = () => new Set(db.prepare('SELECT id FROM events WHERE starts_at > ?').all(nowLocal()).map((r) => r.id));
 mountResource('expenses', 'expenses', { title: 's', amount_cents: 'cents', category: 's?', date: 'd', paid_by: 'i', split: 'split', child_id: 'i?' }, {
+  audit: 'expense',
   order: 'ORDER BY date DESC, id DESC',
   filter: (rows) => { const pending = pendingEventIds(); return rows.filter((e) => !e.event_id || !pending.has(e.event_id)); },
   decode: (r) => ({ ...r, split: parseJ(r.split, {}) }),
@@ -1722,7 +1748,8 @@ function generateRecurringExpenses() {
     while (made < 400) { // garde-fou : rattrapage limité si le serveur est resté longtemps éteint
       const d = recurringDate(t, i);
       if (d > today || (t.repeat_until && d > t.repeat_until)) break;
-      ins.run(t.circle_id, t.title, t.amount_cents, t.category, d, t.paid_by, t.split, t.child_id, t.id, t.created_by);
+      const made1 = ins.run(t.circle_id, t.title, t.amount_cents, t.category, d, t.paid_by, t.split, t.child_id, t.id, t.created_by);
+      audit.created(null, 'expense', db.prepare('SELECT * FROM expenses WHERE id=?').get(made1.lastInsertRowid), { via: 'système', note: 'échéance de la dépense récurrente' });
       i++; made++; touched.add(t.circle_id);
       // Seule l'échéance du jour notifie ; un rattrapage d'échéances passées reste silencieux.
       if (d === today) notify(circleMemberIds(t.circle_id), { kind: 'expense', title: `Dépense récurrente : ${t.title}`, body: `${(t.amount_cents / 100).toFixed(2).replace('.', ',')} €`, link: '#/budget' });
@@ -1734,6 +1761,7 @@ function generateRecurringExpenses() {
 mountResource('recurring-expenses', 'recurring_expenses', {
   title: 's', amount_cents: 'cents', category: 's?', paid_by: 'i', split: 'split', child_id: 'i?', repeat: 'exprep', start_date: 'd', repeat_until: 'd?',
 }, {
+  audit: 'recurring',
   order: 'ORDER BY title COLLATE NOCASE',
   // next_date : prochaine échéance à venir (null si la série est terminée), pour l'afficher telle quelle.
   decode: (r) => {
@@ -1857,8 +1885,9 @@ api.post('/settlements', (req, res) => {
   if (!req.user.is_admin && req.user.id !== from && req.user.id !== to) throw new HttpError(403, "Vous ne pouvez enregistrer qu'un remboursement qui vous concerne.");
   const d = date || nowLocal().slice(0, 10);
   if (!validDate(d)) throw bad('Date invalide.');
-  db.prepare('INSERT INTO settlements(circle_id,from_user,to_user,amount_cents,date,note,created_by) VALUES(?,?,?,?,?,?,?)')
+  const ins = db.prepare('INSERT INTO settlements(circle_id,from_user,to_user,amount_cents,date,note,created_by) VALUES(?,?,?,?,?,?,?)')
     .run(cid, from, to, amt, d, note ? String(note).trim().slice(0, 200) : null, req.user.id);
+  audit.created(req.user, 'settlement', db.prepare('SELECT * FROM settlements WHERE id=?').get(ins.lastInsertRowid));
   notify([from, to], { kind: 'expense', title: 'Remboursement enregistré', body: `${(amt / 100).toFixed(2).replace('.', ',')} €`, link: '#/budget' }, req.user.id);
   emitTo(circleMemberIds(cid), { type: 'refresh', what: 'expenses' });
   res.json({ ok: true });
@@ -1869,8 +1898,37 @@ api.delete('/settlements/:id', (req, res) => {
   requireMember(req.user, s.circle_id);
   if (!canModifyOwn(req.user, s)) throw ownOnly('ce remboursement');
   db.prepare('DELETE FROM settlements WHERE id=?').run(s.id);
+  audit.deleted(req.user, 'settlement', s);
   emitTo(circleMemberIds(s.circle_id), { type: 'refresh', what: 'expenses' });
   res.json({ ok: true });
+});
+
+/* ───────────────────────── Journal d'audit (Budget et Garde) ─────────────────────────
+   Lecture seule : le journal s'écrit uniquement depuis les routes qui modifient les données (voir
+   server/audit.js). Budget : il faut être membre du cercle ; Garde : il faut voir l'enfant concerné
+   (un administrateur voit aussi les entrées d'un enfant supprimé). Pagination par curseur (`before`
+   = dernier id reçu), du plus récent au plus ancien. */
+api.get('/audit', (req, res) => {
+  const { area, circle_id, child_id, user_id, before } = req.query;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 40, 1), 100);
+  const where = []; const args = [];
+  if (area === 'budget') {
+    where.push("area='budget'", 'circle_id=?'); args.push(requireMember(req.user, circle_id));
+  } else if (area === 'garde') {
+    where.push("area='garde'");
+    if (child_id) {
+      if (!canSeeChild(req.user, Number(child_id))) throw new HttpError(403, "Vous n'avez pas accès à cet enfant.");
+      where.push('child_id=?'); args.push(Number(child_id));
+    } else if (!req.user.is_admin) {
+      const ids = db.prepare('SELECT id FROM children').all().map((c) => c.id).filter((id) => canSeeChild(req.user, id));
+      where.push(`child_id IN (${placeholders(ids)})`); args.push(...ids);
+    }
+  } else throw bad('Domaine inconnu (budget ou garde).');
+  if (user_id) { where.push('user_id=?'); args.push(Number(user_id)); }
+  if (before) { where.push('id<?'); args.push(Number(before)); }
+  const rows = db.prepare(`SELECT * FROM audit_log WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args, limit + 1);
+  const more = rows.length > limit;
+  res.json({ entries: rows.slice(0, limit).map((r) => ({ ...r, changes: parseJ(r.changes, []) })), more });
 });
 
 /* ───────────────────────── Documents (fichiers) ───────────────────────── */
@@ -1925,6 +1983,7 @@ api.post('/expenses/:id/invoice', uploadInvoice.single('file'), (req, res) => {
       return doc.lastInsertRowid;
     });
     const documentId = tx();
+    audit.updated(req.user, 'expense', row, db.prepare('SELECT * FROM expenses WHERE id=?').get(row.id));
     emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'expenses' });
     emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'documents' });
     res.json({ document_id: documentId });
@@ -1941,6 +2000,7 @@ api.delete('/expenses/:id/invoice', (req, res) => {
     // Le PDF d'une facture du portail reste dans Documents (il appartient à la facture) : on le détache seulement.
     if (doc && !docUsedByInvoice(doc.id)) { db.prepare('DELETE FROM documents WHERE id=?').run(doc.id); rmFile(doc.stored_name); }
     db.prepare('UPDATE expenses SET document_id=NULL WHERE id=?').run(row.id);
+    audit.updated(req.user, 'expense', row, { ...row, document_id: null });
   }
   emitTo(circleMemberIds(row.circle_id), { type: 'refresh', what: 'expenses' });
   res.json({ ok: true });
@@ -2105,11 +2165,23 @@ api.get('/custody', (req, res) => {
   res.json(rows.filter((n) => canSeeChild(req.user, n.child_id)));
 });
 
-function setNights(dates, childIds, parentId) {
+// `collected` (facultatif) reçoit chaque nuit réellement modifiée ({date, child_id, from, to}), pour le
+// journal d'audit (voir audit.nights) — une nuit remise à l'identique n'y figure pas.
+function setNights(dates, childIds, parentId, collected) {
+  const cur = db.prepare('SELECT parent_id FROM custody_nights WHERE date=? AND child_id=?');
   const up = db.prepare('INSERT INTO custody_nights(date,child_id,parent_id) VALUES(?,?,?) ON CONFLICT(date,child_id) DO UPDATE SET parent_id=excluded.parent_id');
   const del = db.prepare('DELETE FROM custody_nights WHERE date=? AND child_id=?');
   db.transaction(() => {
-    for (const d of dates) for (const c of childIds) (parentId ? up.run(d, c, parentId) : del.run(d, c));
+    for (const d of dates) {
+      for (const c of childIds) {
+        if (collected) {
+          const before = cur.get(d, c);
+          const from = before ? before.parent_id : null;
+          if (from !== (parentId || null)) collected.push({ date: d, child_id: c, from, to: parentId || null });
+        }
+        if (parentId) up.run(d, c, parentId); else del.run(d, c);
+      }
+    }
   })();
 }
 function datesBetween(from, to) {
@@ -2146,7 +2218,9 @@ api.put('/custody', (req, res) => {
   const kids = checkChildren(child_ids, req);
   if (parent_id !== null && parent_id !== undefined && !userExists(Number(parent_id))) throw bad('Parent introuvable.');
   if (parent_id !== null && parent_id !== undefined) checkCustodyParent(kids, Number(parent_id));
-  setNights(dates, kids, parent_id ? Number(parent_id) : null);
+  const changed = [];
+  setNights(dates, kids, parent_id ? Number(parent_id) : null, changed);
+  audit.nights(req.user, changed, 'saisie manuelle');
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ ok: true });
 });
@@ -2168,11 +2242,15 @@ api.put('/custody/handovers', (req, res) => {
   if (time && !validTime(time)) throw bad('Heure de transition invalide.');
   const loc = location ? String(location).trim().slice(0, 200) : null;
   const t = time || null;
+  const hoBefore = db.prepare('SELECT * FROM custody_handovers WHERE child_id=? AND date=?').get(kids[0], date);
   if (!loc && !t) {
     db.prepare('DELETE FROM custody_handovers WHERE child_id=? AND date=?').run(kids[0], date);
+    if (hoBefore) audit.deleted(req.user, 'handover', hoBefore);
   } else {
     db.prepare(`INSERT INTO custody_handovers(child_id,date,location,time) VALUES(?,?,?,?)
       ON CONFLICT(child_id,date) DO UPDATE SET location=excluded.location, time=excluded.time`).run(kids[0], date, loc, t);
+    const hoAfter = db.prepare('SELECT * FROM custody_handovers WHERE child_id=? AND date=?').get(kids[0], date);
+    if (hoBefore) audit.updated(req.user, 'handover', hoBefore, hoAfter); else audit.created(req.user, 'handover', hoAfter);
   }
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ ok: true });
@@ -2207,25 +2285,27 @@ api.post('/custody/generate', (req, res) => {
   if (!userExists(a) || !userExists(b) || a === b) throw bad('Choisissez deux parents différents.');
   checkCustodyParent(kids, a); checkCustodyParent(kids, b);
   let seq;
+  const changed = [];
   if (pattern === 'halves') {
     const half = Math.ceil(dates.length / 2);
     seq = null;
-    setNights(dates.slice(0, half), kids, a);
-    setNights(dates.slice(half), kids, b);
+    setNights(dates.slice(0, half), kids, a, changed);
+    setNights(dates.slice(half), kids, b, changed);
   } else if (pattern === 'even_odd_weeks') {
     seq = null;
     const aIsEven = parent_a_weeks !== 'odd';
-    setNights(dates.filter((d) => (isoWeek(d) % 2 === 0) === aIsEven), kids, a);
-    setNights(dates.filter((d) => (isoWeek(d) % 2 === 0) !== aIsEven), kids, b);
+    setNights(dates.filter((d) => (isoWeek(d) % 2 === 0) === aIsEven), kids, a, changed);
+    setNights(dates.filter((d) => (isoWeek(d) % 2 === 0) !== aIsEven), kids, b, changed);
   } else if (pattern === 'custom') {
     if (!/^[ABab]{1,60}$/.test(sequence || '')) throw bad('Séquence invalide : utilisez uniquement A et B (60 nuits maximum).');
     seq = sequence.toUpperCase();
   } else if (PATTERNS[pattern]) seq = PATTERNS[pattern];
   else throw bad('Modèle inconnu.');
   if (seq) {
-    setNights(dates.filter((_, i) => seq[i % seq.length] === 'A'), kids, a);
-    setNights(dates.filter((_, i) => seq[i % seq.length] === 'B'), kids, b);
+    setNights(dates.filter((_, i) => seq[i % seq.length] === 'A'), kids, a, changed);
+    setNights(dates.filter((_, i) => seq[i % seq.length] === 'B'), kids, b, changed);
   }
+  audit.nights(req.user, changed, `génération « ${pattern} » du ${start} au ${end}`);
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ nights: dates.length * kids.length });
 });
@@ -2292,7 +2372,11 @@ api.post('/swaps/:id/answer', (req, res) => {
   const accept = !!(req.body || {}).accept;
   const r = db.prepare("UPDATE swap_requests SET status=?, answered_at=datetime('now') WHERE id=? AND status='pending'").run(accept ? 'accepted' : 'declined', s.id);
   if (!r.changes) throw new HttpError(409, 'Cette demande a déjà été traitée.');
-  if (accept) setNights(datesBetween(s.date_from, s.date_to), parseJ(s.child_ids, []).filter(childExists), s.new_parent_id);
+  if (accept) {
+    const changed = [];
+    setNights(datesBetween(s.date_from, s.date_to), parseJ(s.child_ids, []).filter(childExists), s.new_parent_id, changed);
+    audit.nights(req.user, changed, `échange accepté (demandé par ${(db.prepare('SELECT name FROM users WHERE id=?').get(s.requester_id) || {}).name || '?'})`);
+  }
   notify([s.requester_id], { kind: 'swap', title: `${req.user.name} a ${accept ? 'accepté' : 'refusé'} votre demande d'échange`, body: `Du ${s.date_from} au ${s.date_to}`, link: '#/garde' });
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ ok: true });

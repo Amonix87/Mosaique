@@ -665,4 +665,32 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_custody_handovers ON custody_handovers(child_id, date);
 `);
 
+// Journal d'audit (Budget et Garde) : qui a modifié quoi, quand, et l'avant → après. AJOUT SEUL : les
+// déclencheurs refusent toute modification ou suppression, et il n'y a volontairement aucune clé
+// étrangère (le journal survit à la suppression d'une dépense, d'un enfant ou d'un compte ; le nom de
+// l'auteur y est recopié pour la même raison). Voir server/audit.js.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    user_id INTEGER,
+    user_name TEXT,
+    via TEXT NOT NULL DEFAULT 'app',
+    area TEXT NOT NULL,
+    action TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    entity_id INTEGER,
+    circle_id INTEGER,
+    child_id INTEGER,
+    summary TEXT NOT NULL,
+    changes TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_circle ON audit_log(area, circle_id, id);
+  CREATE INDEX IF NOT EXISTS idx_audit_child ON audit_log(area, child_id, id);
+  CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
+    BEGIN SELECT RAISE(ABORT, 'audit_log est en ajout seul'); END;
+  CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
+    BEGIN SELECT RAISE(ABORT, 'audit_log est en ajout seul'); END;
+`);
+
 module.exports = { db, DATA_DIR, MEDIA_DIR };

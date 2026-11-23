@@ -443,3 +443,16 @@ dialog.modal.sheet .btn.primary { width: 100%; justify-content: center; padding:
 .alloc-row small { display: block; }
 .alloc-row details { margin-top: .25rem; font-size: .85rem; }
 .alloc-detail { margin: .3rem 0 0; padding-left: 1.1rem; }
+
+/* Historique des modifications (journal d'audit) */
+.audit-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
+.audit-row { padding: .6rem .75rem; border: 1px solid var(--line, #e3e6ee); border-radius: 10px; display: grid; gap: .25rem; }
+.audit-head { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+.audit-badge { font-size: .7rem; font-weight: 700; padding: .1rem .45rem; border-radius: 999px; background: #e8ecfa; color: #2C3E9F; }
+.audit-badge.create { background: #e3f4e8; color: #1d6b36; }
+.audit-badge.delete { background: #fbe6e6; color: #a32323; }
+.audit-changes { list-style: none; margin: .2rem 0 0; padding: 0; display: grid; gap: .15rem; font-size: .9rem; }
+.audit-changes li { display: flex; gap: .5rem; flex-wrap: wrap; }
+.audit-label { font-weight: 600; min-width: 9rem; }
+.audit-changes del { color: #a32323; text-decoration-thickness: 1px; }
+.audit-changes ins { color: #1d6b36; text-decoration: none; font-weight: 600; }

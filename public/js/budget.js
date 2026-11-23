@@ -1,4 +1,5 @@
 import { h, icon, state, get, post, put, del, act, toast, formModal, modal, confirmBox, opt, onRefresh, pageHead, circleChips, periodFilter, activeCircleId, euro, fmtDayY, today, avatar, userById, userName, childById, myCircles, membersOfCircle, emptyState, mount, append, myEditableChildren, pad2, readable } from './core.js';
+import { historyButton } from './audit.js';
 import { equalSplit, isFull, boundaries, moveBoundary, setShare, fmtPct } from './split.js';
 
 const MONTH_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -374,6 +375,7 @@ export async function budget(root) {
 
   append(root, pageHead('Budget', h('div', { class: 'row gap' },
     h('button', { class: 'btn', id: 'alloc-btn', hidden: true, onclick: () => act(() => allocationDialog({ circleId, done: load })) }, icon('swap', 16), 'Répartition selon la garde'),
+    historyButton({ area: 'budget', circleId }),
     h('button', { class: 'btn', onclick: () => settlementForm({ circleId, done: load }) }, icon('swap', 16), 'Remboursement'),
     h('button', { class: 'btn primary', onclick: () => expenseForm({ circleId, done: load }) }, icon('plus', 16), 'Dépense'))),
     unassignedBox, chips, filterBar, balBox, pendingBox, catBox, trendBox, recBox, listBox);
