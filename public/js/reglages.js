@@ -1,4 +1,4 @@
-import { h, icon, state, get, post, put, del, act, toast, confirmBox, pageHead, TILE_COLORS, applyMe, mount, append, publicOrigin, pushSubscriptionStatus, enablePush, disablePush, opt } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, copyText, confirmBox, pageHead, TILE_COLORS, applyMe, mount, append, publicOrigin, pushSubscriptionStatus, enablePush, disablePush, opt } from './core.js';
 import { installBlock, pushUnsupportedNode } from './install.js';
 
 let integrationToken; // chargé à la demande (jeton sensible, jamais inclus dans /me)
@@ -194,11 +194,11 @@ export async function reglages(root) {
       h('div', { class: 'row between center', style: { marginTop: '1rem' } },
         h('div', null, h('strong', null, 'Abonnement agenda'), h('p', { class: 'muted' }, 'Ajoutez votre planning à votre application de calendrier habituelle.')),
         h('div', { class: 'row gap' },
-          h('button', { class: 'btn small', onclick: (e) => { navigator.clipboard.writeText(`${publicOrigin()}/ical/${me.ical_token}.ics`); e.target.textContent = 'Copié !'; } }, icon('copy', 14), ' Copier le lien'),
+          h('button', { class: 'btn small', onclick: () => copyText(`${publicOrigin()}/ical/${me.ical_token}.ics`) }, icon('copy', 14), ' Copier le lien'),
           h('button', { class: 'btn small', onclick: async () => { if (await confirmBox('Régénérer le lien invalidera les abonnements existants (agenda et présence). Continuer ?', 'Régénérer')) act(async () => { const r = await post('/me/ical-token'); me.ical_token = r.ical_token; toast('Lien régénéré'); draw(); }); } }, 'Régénérer'))),
       h('div', { class: 'row between center', style: { marginTop: '1rem' } },
         h('div', null, h('strong', null, 'Présence (Home Assistant, automatisations…)'), h('p', { class: 'muted' }, "Indique, pour chaque enfant, s'il est chez vous ce soir d'après la garde renseignée. Utilise le même lien que l'agenda.")),
-        h('button', { class: 'btn small', onclick: (e) => { navigator.clipboard.writeText(`${publicOrigin()}/presence/${me.ical_token}.json`); e.target.textContent = 'Copié !'; } }, icon('copy', 14), ' Copier le lien')),
+        h('button', { class: 'btn small', onclick: () => copyText(`${publicOrigin()}/presence/${me.ical_token}.json`) }, icon('copy', 14), ' Copier le lien')),
       !state.settings.public_url ? h('p', { class: 'hint', style: { marginTop: '.4rem' } }, "Adresse publique non configurée : les liens ci-dessus reprennent l'adresse depuis laquelle vous êtes connecté·e, qui peut ne pas fonctionner depuis l'extérieur. Un administrateur peut la renseigner plus bas dans cette page.") : null));
 
     if (me.is_admin) {
@@ -243,10 +243,10 @@ export async function reglages(root) {
           h('p', { class: 'muted' }, "Ce jeton, propre à toute la famille, permet à une source externe (par exemple une automatisation Home Assistant reliée à Pronote) d'envoyer des devoirs et des mots dans Mosaïque. Voir le README pour un exemple complet."),
           integrationToken ? h('div', { class: 'stack' },
             h('div', { class: 'copy-row' }, h('input', { readonly: true, value: integrationToken, onclick: (e) => e.target.select() }),
-              h('button', { class: 'btn', type: 'button', onclick: (e) => { navigator.clipboard.writeText(integrationToken); e.target.textContent = 'Copié !'; } }, 'Copier')),
+              h('button', { class: 'btn', type: 'button', onclick: () => copyText(integrationToken) }, 'Copier')),
             h('p', { class: 'hint' }, `Adresses d'envoi : ${publicOrigin()}/import/${integrationToken}/homework et /note`),
             h('button', { class: 'btn small', onclick: async () => { if (await confirmBox("Régénérer invalidera l'ancien jeton pour toute intégration déjà branchée. Continuer ?", 'Régénérer')) act(async () => { const r = await post('/settings/integration-token'); integrationToken = r.token; toast('Jeton régénéré'); draw(); }); } }, 'Régénérer'))
-            : h('button', { class: 'btn primary', onclick: async () => { const r = await post('/settings/integration-token'); integrationToken = r.token; draw(); } }, 'Générer un jeton')));
+            : h('button', { class: 'btn primary', onclick: () => act(async () => { const r = await post('/settings/integration-token'); integrationToken = r.token; draw(); }) }, 'Générer un jeton')));
 
         sections.push(addonsSection());
       }

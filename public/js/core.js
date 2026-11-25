@@ -147,6 +147,22 @@ export function toast(msg, isError = false) {
   if (isError) t.addEventListener('click', () => t.remove());
   else setTimeout(() => t.remove(), 2600);
 }
+// Copie dans le presse-papiers. navigator.clipboard n'existe qu'en contexte sécurisé (HTTPS ou localhost) : sur une
+// installation consultée en http://adresse-locale, il est absent et le bouton ne faisait rien. Repli : zone de texte
+// temporaire + execCommand ; à défaut, on le dit au lieu d'échouer en silence.
+export async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); toast('Copié dans le presse-papiers'); return true; }
+  } catch { /* on tente le repli ci-dessous */ }
+  const ta = h('textarea', { readonly: true, style: { position: 'fixed', top: '0', left: '0', opacity: '0' } }, text);
+  document.body.append(ta);
+  ta.select();
+  let done = false;
+  try { done = document.execCommand('copy'); } catch { done = false; }
+  ta.remove();
+  if (done) toast('Copié dans le presse-papiers'); else toast('Copie impossible ici : sélectionnez le texte et copiez-le à la main.', true);
+  return done;
+}
 export async function act(fn) {
   try { return await fn(); } catch (e) { toast(e.message, true); }
 }

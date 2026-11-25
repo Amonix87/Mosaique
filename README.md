@@ -344,6 +344,10 @@ Dans **Famille → Réglages**, un administrateur peut activer ou désactiver :
 
 Désactiver une fonctionnalité la masque simplement de la navigation ; les données existantes ne sont jamais supprimées et réapparaissent si vous la réactivez plus tard.
 
+## Retirer un membre de la famille
+
+Annuler l'invitation d'un membre qui n'a pas encore activé son compte est immédiat. Retirer un membre **qui a déjà servi** supprime avec lui ce qu'il a créé (dépenses qu'il a payées, remboursements, nuits de garde, messages) : les soldes des autres changent. Mosaïque ne le fait donc jamais sans prévenir — elle liste d'abord ce qui disparaîtrait et demande une seconde confirmation (« Tout supprimer »). Il est aussi retiré de la liste des parents et lecteurs désignés des enfants (sauf s'il en était le seul parent : l'enfant resterait sinon visible de tout le monde). Pensez à télécharger une sauvegarde avant (Réglages).
+
 ## Agenda et synchronisation (iCal)
 
 L'abonnement iCal (**Famille → Mon compte → Abonnement agenda**) fonctionne **à sens unique** : votre application de calendrier (téléphone, Google Calendar, Outlook…) lit régulièrement le planning de Mosaïque, mais rien de ce que vous ajoutez depuis cette application externe ne remonte vers Mosaïque. Pour une synchronisation dans les deux sens, il faudrait un protocole différent (CalDAV), non fourni par défaut.

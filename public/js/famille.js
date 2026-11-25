@@ -1,4 +1,4 @@
-import { h, icon, state, get, post, put, del, act, toast, formModal, confirmBox, modal, opt, pageHead, avatar, TILE_COLORS, myCircles, applyMe, mount, append, publicOrigin, handoverLocationField } from './core.js';
+import { h, icon, state, get, post, put, del, act, toast, copyText, formModal, confirmBox, modal, opt, pageHead, avatar, TILE_COLORS, myCircles, applyMe, mount, append, publicOrigin, handoverLocationField } from './core.js';
 
 const BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
@@ -24,7 +24,7 @@ function inviteForm(circles, done) {
       modal('Membre créé', h('div', { class: 'stack' },
         h('p', null, `${v.name} apparaît déjà partout dans l'application (cercles, garde, tâches...). Envoyez-lui ce lien pour qu'il ou elle active son compte (mot de passe, e-mail) — valable 7 jours :`),
         h('div', { class: 'copy-row' }, h('input', { readonly: true, value: link, onclick: (e) => e.target.select() }),
-          h('button', { class: 'btn', type: 'button', onclick: (e) => { navigator.clipboard.writeText(link); e.target.textContent = 'Copié !'; } }, 'Copier')),
+          h('button', { class: 'btn', type: 'button', onclick: () => copyText(link) }, 'Copier')),
         !state.settings.public_url ? h('p', { class: 'hint' }, "Ce lien reprend l'adresse depuis laquelle vous êtes connecté·e en ce moment. Si la personne invitée n'est pas sur le même réseau, définissez PUBLIC_URL (voir le README) pour un lien toujours valide de partout.") : null));
       done();
     },
@@ -34,16 +34,16 @@ function inviteForm(circles, done) {
 function reinviteLink(u, done) {
   modal('Lien à renvoyer', h('div', { class: 'stack' },
     h('p', null, `Génère un nouveau lien d'activation pour ${u.name} (l'ancien, s'il existait encore, sera invalidé).`),
-    h('div', { class: 'row end' }, h('button', { class: 'btn primary', type: 'button', onclick: async (e) => {
+    h('div', { class: 'row end' }, h('button', { class: 'btn primary', type: 'button', onclick: (e) => act(async () => {
       const r = await post(`/users/${u.id}/reinvite`);
       const link = inviteLink(r.token);
       e.target.closest('dialog').close();
       modal('Nouveau lien', h('div', { class: 'stack' },
         h('div', { class: 'copy-row' }, h('input', { readonly: true, value: link, onclick: (ev) => ev.target.select() }),
-          h('button', { class: 'btn', type: 'button', onclick: (ev) => { navigator.clipboard.writeText(link); ev.target.textContent = 'Copié !'; } }, 'Copier')),
+          h('button', { class: 'btn', type: 'button', onclick: () => copyText(link) }, 'Copier')),
         !state.settings.public_url ? h('p', { class: 'hint' }, "Ce lien reprend l'adresse depuis laquelle vous êtes connecté·e en ce moment (PUBLIC_URL non configuré).") : null));
       done();
-    } }, 'Générer le lien'))));
+    }) }, 'Générer le lien'))));
 }
 
 function circleForm(c, done) {

@@ -263,11 +263,20 @@ export async function agenda(root) {
   let events = []; let custody = []; let holidays = [];
   const first = () => { const d = new Date(cursor.y, cursor.m, 1); const off = (d.getDay() + 6) % 7; d.setDate(1 - off); return d; };
 
+  // Vacances : celles de la zone de chaque enfant (et non d'une zone fixe) ; zone B à défaut d'enfant.
+  // Si les enfants ne sont pas tous dans la même zone, les périodes des deux zones sont affichées.
+  const zonesInUse = () => [...new Set(state.children.map((c) => c.zone).filter(Boolean))].sort();
+  let loadSeq = 0;
   async function load() {
+    const seq = ++loadSeq; // un clic rapide sur « mois suivant » ne doit pas laisser une vieille réponse écraser la plus récente
     const start = first();
     const from = ymd(start); const to = addDays(from, 41);
-    const [e, c, hol] = await Promise.all([get(`/events/range?from=${from}&to=${to}`), get(`/custody?from=${from}&to=${to}`), get('/holidays')]);
-    events = e; custody = c; holidays = hol.periods;
+    const zones = zonesInUse().length ? zonesInUse() : ['B'];
+    const [e, c, ...hol] = await Promise.all([get(`/events/range?from=${from}&to=${to}`), get(`/custody?from=${from}&to=${to}`), ...zones.map((z) => get(`/holidays?zone=${z}`))]);
+    if (seq !== loadSeq) return;
+    events = e; custody = c;
+    const seen = new Set();
+    holidays = hol.flatMap((r) => r.periods).filter((p) => { const k = `${p.name}|${p.start}|${p.end}`; if (seen.has(k)) return false; seen.add(k); return true; });
     draw();
   }
   const reloadAll = () => { load(); if (searching) runSearch(); };

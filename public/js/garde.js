@@ -72,7 +72,9 @@ export async function garde(root) {
   const clearSel = () => { anchor = null; sel = null; };
   const monthKey = () => `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}`;
 
+  let loadSeq = 0;
   async function load() {
+    const seq = ++loadSeq; // un clic rapide sur « mois suivant » ne doit pas laisser une vieille réponse écraser la plus récente
     const from = ymd(new Date(cursor.y, cursor.m, 1));
     const to = ymd(new Date(cursor.y, cursor.m + 1, 0));
     // Un jour avant le mois : permet de détecter une transition dès le 1er du mois, en comparant à la
@@ -84,6 +86,7 @@ export async function garde(root) {
       get(`/custody/handovers?from=${from}&to=${to}`),
       ...zones.map((z) => get(`/holidays?zone=${z}`)),
     ]);
+    if (seq !== loadSeq) return;
     nights = n; stats = s; swaps = sw; handovers = ho;
     holidaysByZone = Object.fromEntries(zones.map((z, i) => [z, hols[i].periods]));
     draw();
