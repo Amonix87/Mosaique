@@ -244,6 +244,35 @@ function testEportailHistoryParsing() {
   const refused = _parseDemandeDetail(detailHtml('Refusé', '02/10/2026', '02/10/2026'), 741052917);
   assert.deepStrictEqual(refused, [], 'une demande refusée ne doit jamais remonter comme réservation');
 
+  // Vacances scolaires : l'API du ministère étiquette désormais « - » (et non « Élèves ») la population des
+  // vacances communes à tous — filtrer sur « Élèves » seul ne laissait que l'été, et l'agenda n'affichait
+  // plus ni Toussaint, ni Noël… Dates : instants UTC à convertir en jour local de Paris (veille sinon).
+  {
+    const hol = require('../server/holidays');
+    const url = decodeURIComponent(hol._buildUrl(200, new Date('2026-11-25T12:00:00Z')));
+    assert.ok(url.includes('population="-"') && url.includes('population="Élèves"'), 'les deux populations sont demandées');
+    assert.ok(url.includes('offset=200') && url.includes('limit=100'), 'requête paginée (plusieurs centaines de lignes)');
+    assert.ok(url.includes('start_date>="2025-08-01"'));
+    assert.strictEqual(hol._localDay('2026-10-16T22:00:00+00:00'), '2026-10-17', 'été (UTC+2) : samedi et non vendredi');
+    assert.strictEqual(hol._localDay('2025-12-19T23:00:00+00:00'), '2025-12-20', 'hiver (UTC+1)');
+    assert.strictEqual(hol._localDay('2026-11-01T23:00:00+00:00'), '2026-11-02', 'reprise le lundi');
+    assert.strictEqual(hol._localDay('2026-10-17'), '2026-10-17', 'date sans heure inchangée');
+    const row = (description, zones, s, e) => ({ description, zones, start_date: s, end_date: e, population: '-' });
+    const periods = hol._parseRows([
+      row('Vacances de la Toussaint', 'Zone B', '2026-10-16T22:00:00+00:00', '2026-11-01T23:00:00+00:00'),
+      row('Vacances de la Toussaint', 'Zone B', '2026-10-16T22:00:00+00:00', '2026-11-01T23:00:00+00:00'), // autre académie, même zone
+      row('Vacances de la Toussaint', 'Zone A', '2026-10-16T22:00:00+00:00', '2026-11-01T23:00:00+00:00'),
+      row('Vacances de Noël', 'Zone B', '2026-12-18T23:00:00+00:00', '2027-01-03T23:00:00+00:00'),
+      row("Pont de l'Ascension", 'Zone B', '2027-05-06T22:00:00+00:00', '2027-05-09T22:00:00+00:00'),
+      row("Début des Vacances d'Été", 'Zone B', '2028-07-03T22:00:00+00:00', '2028-07-03T22:00:00+00:00'),
+      row('Vacances de la Toussaint', 'Martinique', '2026-10-16T22:00:00+00:00', '2026-11-01T23:00:00+00:00'),
+    ]);
+    assert.deepStrictEqual(periods, [
+      { name: 'Toussaint', zones: ['B', 'A'], start: '2026-10-17', end: '2026-11-02' },
+      { name: 'Noël', zones: ['B'], start: '2026-12-19', end: '2027-01-04' },
+    ], 'une période par vacance, ponts / repères / outre-mer ignorés');
+  }
+
   // Classement des réservations du portail : le mercredi (matin / après-midi) n'était pas reconnu, et
   // « MERCREDI APRES MIDI » passait pour un repas à cause du mot « midi » (rappel du jeudi 19 : « seuls les
   // midis sont réservés » alors que le mercredi l'était en journée).

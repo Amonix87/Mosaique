@@ -59,6 +59,18 @@ function fetchJson(url) {
   });
 }
 
+// L'API donne des instants UTC (« 2026-10-16T22:00:00+00:00 » = samedi 17 octobre 00:00 à Paris) : garder
+// les 10 premiers caractères donnait la veille (le vendredi, dernier jour de classe, passait pour un jour
+// de vacances, et la reprise s'affichait un jour trop tôt). On convertit donc en date locale de Paris.
+// Une date sans heure (« 2026-10-17 ») est gardée telle quelle.
+const PARIS_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit' });
+function localDay(raw) {
+  const t = String(raw);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? t.slice(0, 10) : PARIS_DAY.format(d);
+}
+
 function parseRows(rows) {
   const seen = new Set();
   const periods = [];
@@ -66,8 +78,9 @@ function parseRows(rows) {
     const name = matchName(r.description);
     const zoneMatch = /Zone\s*([ABC])/i.exec(r.zones || '');
     if (!name || !zoneMatch || !r.start_date || !r.end_date) continue;
-    const start = String(r.start_date).slice(0, 10);
-    const end = String(r.end_date).slice(0, 10);
+    const start = localDay(r.start_date);
+    const end = localDay(r.end_date);
+    if (end <= start) continue; // « Début des Vacances d'Été » : un simple repère d'un jour, pas une période
     const zone = zoneMatch[1].toUpperCase();
     const key = `${name}|${zone}|${start}|${end}`;
     if (seen.has(key)) continue; // plusieurs académies partagent la même zone : on ne garde qu'une fois
@@ -79,15 +92,26 @@ function parseRows(rows) {
   return periods;
 }
 
+// Requête de l'API, page par page. Le ministère renseigne la colonne « population » par « - » pour les
+// vacances communes à tous (Toussaint, Noël, hiver, printemps…) et par « Élèves » seulement quand elles
+// diffèrent de celles des enseignants (l'été) : filtrer sur « Élèves » seul ne laissait donc que l'été.
+// On garde les deux, uniquement pour les zones A/B/C (pas l'outre-mer, ignoré de toute façon plus loin).
+const PAGE = 100; // maximum accepté par l'API par requête
+function buildUrl(offset, now = new Date()) {
+  const where = encodeURIComponent(`(population="Élèves" OR population="-") AND zones IN ("Zone A","Zone B","Zone C") AND start_date>="${now.getFullYear() - 1}-08-01"`);
+  return `${API_URL}?where=${where}&limit=${PAGE}&offset=${offset}&order_by=start_date`;
+}
+
 async function fetchFromApi() {
-  // On demande les deux prochaines années scolaires d'un coup (assez large pour couvrir toute
-  // l'année en cours et la suivante), filtré sur la population "Élèves" pour ne garder que les
-  // vacances des enfants (pas celles, légèrement différentes, des enseignants).
-  const thisYear = new Date().getFullYear();
-  const where = encodeURIComponent(`population="Élèves" AND start_date>="${thisYear - 1}-08-01"`);
-  const url = `${API_URL}?where=${where}&limit=100&order_by=start_date`;
-  const json = await fetchJson(url);
-  const rows = Array.isArray(json.results) ? json.results : [];
+  // Les deux prochaines années scolaires d'un coup (assez large pour couvrir l'année en cours et la
+  // suivante) : un enregistrement par académie, donc plusieurs centaines de lignes à parcourir.
+  const rows = [];
+  for (let offset = 0; offset < 2000; offset += PAGE) {
+    const json = await fetchJson(buildUrl(offset));
+    const page = Array.isArray(json.results) ? json.results : [];
+    rows.push(...page);
+    if (page.length < PAGE || (Number.isInteger(json.total_count) && rows.length >= json.total_count)) break;
+  }
   const periods = parseRows(rows);
   if (!periods.length) throw new Error('réponse vide ou format inattendu');
   return periods;
@@ -135,4 +159,4 @@ function startAutoRefresh() {
   setInterval(refresh, REFRESH_MS).unref();
 }
 
-module.exports = { loadHolidays, startAutoRefresh, _fetchFromApi: fetchFromApi, _parseRows: parseRows };
+module.exports = { loadHolidays, startAutoRefresh, _fetchFromApi: fetchFromApi, _parseRows: parseRows, _buildUrl: buildUrl, _localDay: localDay };
