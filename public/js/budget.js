@@ -349,6 +349,26 @@ function settlementForm({ circleId, done, from = null, to = null, amountCents = 
   });
 }
 
+// Part de chacun, en centimes, d'un partage en pourcentages (même arrondi que le serveur : le dernier prend le reste).
+function sharesOf(amount, split) {
+  const ids = Object.keys(split); let sum = 0; const out = {};
+  ids.forEach((id, i) => { const v = i === ids.length - 1 ? amount - sum : Math.round((amount * split[id]) / 100); out[id] = v; sum += v; });
+  return out;
+}
+// « Au réel » d'une facture périscolaire déjà payée : ce que devrait chaque personne (hors payeur) si la
+// facture était partagée selon la garde (voir allocationDialog), à côté de ce qui est compté aujourd'hui.
+function realHint(r, e) {
+  if (!r) return null;
+  const real = sharesOf(e.amount_cents, r.proposed); const now = sharesOf(e.amount_cents, r.current);
+  const ids = Object.keys(real).filter((id) => Number(id) !== e.paid_by);
+  if (!ids.length) return null;
+  const text = ids.map((id) => (r.changed
+    ? `${userName(Number(id))} ${euro(real[id])} au lieu de ${euro(now[id] || 0)}`
+    : `${userName(Number(id))} ${euro(real[id])}`)).join(' · ');
+  return h('small', { class: `alloc-hint${r.changed ? ' changed' : ''}`, title: r.changed ? 'Selon la garde (cantine et ALSH à 50/50) — pas encore appliqué : bouton « Répartition selon la garde ».' : 'La répartition actuelle est déjà celle de la garde.' },
+    r.changed ? `Au réel (garde) : ${text}` : `Conforme à la garde : ${text}`);
+}
+
 // Spécification de la visionneuse pour la facture PDF d'un document (voir public/js/viewer.js).
 const invoiceViewer = (documentId, title) => ({
   url: `/api/documents/${documentId}/file?inline=1`, downloadUrl: `/api/documents/${documentId}/file`, title: title || 'Facture', filename: 'facture.pdf', isPdf: true,
@@ -359,7 +379,7 @@ export async function budget(root) {
   if (!circles.length) { append(root, pageHead('Budget'), emptyState('Aucun cercle disponible.')); return; }
   let circleId;
   let category = ''; // filtre de catégorie de l'historique ('' = toutes)
-  let expenses = []; let recurring = []; let invoices = []; let summary = { balances: {}, transfers: [], categories: [], settlements: [] };
+  let expenses = []; let recurring = []; let invoices = []; let allocation = new Map(); let summary = { balances: {}, transfers: [], categories: [], settlements: [] };
 
   // Pastilles partagées avec les autres pages : elles se redessinent au clic (la surbrillance suit
   // le cercle choisi) et gardent le même cercle actif d'une page à l'autre.
@@ -387,7 +407,10 @@ export async function budget(root) {
     unassignedBox, chips, filterBar, balBox, pendingBox, catBox, trendBox, recBox, listBox);
 
   async function load() {
-    [expenses, recurring, summary, invoices] = await Promise.all([get('/expenses'), get('/recurring-expenses'), get(`/expenses/summary?circle_id=${circleId}&${period.query()}`), get('/invoices')]);
+    let alloc = { invoices: [] };
+    [expenses, recurring, summary, invoices, alloc] = await Promise.all([get('/expenses'), get('/recurring-expenses'), get(`/expenses/summary?circle_id=${circleId}&${period.query()}`), get('/invoices'),
+      get(`/invoices/allocation?circle_id=${circleId}`).catch(() => ({ invoices: [] }))]); // l'indication « au réel » est un plus : son échec ne doit pas bloquer le budget
+    allocation = new Map(alloc.invoices.map((r) => [r.expense_id, r]));
     period.setYears([...new Set(expenses.filter((e) => e.circle_id === circleId).map((e) => e.date.slice(0, 4)))]);
     draw();
   }
@@ -526,7 +549,8 @@ export async function budget(root) {
       avatar(e.paid_by, 28),
       h('div', { class: 'expense-main' }, h('strong', null, e.title),
         h('small', null, `${fmtDayY(e.date)} · ${e.category || 'Autre'} · payé par ${userName(e.paid_by)}`, e.child_id && childById(e.child_id) ? ` · ${childById(e.child_id).name}` : '',
-          e.recurring_id ? ' · récurrente' : '', e.event_id ? ' · issue d\'un événement' : '')),
+          e.recurring_id ? ' · récurrente' : '', e.event_id ? ' · issue d\'un événement' : ''),
+        realHint(allocation.get(e.id), e)),
       h('strong', null, euro(e.amount_cents)),
       e.document_id ? viewerLink({ class: 'icon-btn doc-ok', 'aria-label': 'Voir la facture', title: 'Facture enregistrée dans Documents — ouvrir le PDF' }, invoiceViewer(e.document_id, e.title), icon('doc', 16)) : null,
       canModify(e) ? h('button', { class: 'icon-btn', 'aria-label': 'Modifier', onclick: () => expenseForm({ circleId, done: load, expense: e }) }, icon('edit', 16)) : null,
