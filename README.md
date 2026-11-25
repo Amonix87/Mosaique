@@ -381,6 +381,16 @@ En supprimant un événement qui se répète, Mosaïque propose trois choix :
 
 Une demande d'échange de garde peut préciser un lieu et une heure de transition différents de l'habitude (facultatif) — utile quand l'échange s'accompagne d'un changement d'endroit ou d'horaire ponctuel. Affiché à la personne sollicitée avant qu'elle n'accepte.
 
+## Notifications de garde
+
+Les autres parents sont prévenus à chaque changement de garde :
+
+- **Changement de planning** (saisie manuelle ou génération d'un planning) : **une seule notification groupée** par saisie, même pour plusieurs nuits ou plusieurs enfants — elle résume qui passe à qui et combien de nuits (« 5 nuits : 14/12 → 18/12 (Marie → Jean-Paul) »). Si aucune nuit ne change réellement, rien n'est envoyé. Sont prévenus les parents désignés des enfants concernés (ou tout le monde si aucun n'est désigné) ainsi que ceux dont les nuits changent ; l'auteur n'est jamais notifié de sa propre action.
+- **Lieu / heure d'échange ponctuels** : créés, modifiés ou supprimés.
+- **Demandes d'échange** : demande, acceptation ou refus, **modification** (dates, qui aura les enfants, lieu, heure, message — tant que la demande est en attente), **annulation** par le demandeur, **suppression** de l'historique. Le demandeur retrouve les boutons « Modifier » et « Annuler la demande » sur ses demandes en attente, et une corbeille sur ses demandes passées.
+
+Supprimer une demande **déjà acceptée** ne remet pas les nuits comme avant : le planning reste tel quel (à corriger dans la grille si besoin).
+
 ## Installation sur l'écran d'accueil et notifications push
 
 Sur téléphone et tablette (jamais sur ordinateur), Mosaïque invite à s'installer, puis à activer les notifications — chaque fenêtre au plus une fois par visite, avec « Plus tard » (revient dans quelques jours) et « Ne plus me le proposer ». Ce choix est mémorisé par navigateur (stockage local), pas par compte.

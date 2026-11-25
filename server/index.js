@@ -2265,6 +2265,26 @@ function setNights(dates, childIds, parentId, collected) {
     }
   })();
 }
+// Un changement de garde prévient les autres parents des enfants concernés — UN message par saisie (même pour
+// 200 nuits générées d'un coup, ou plusieurs enfants), qui résume qui passe à qui et quelles dates.
+const frDay = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+function notifyCustodyChange(actor, collected, how) {
+  const groups = audit.groupNights(collected);
+  if (!groups.length) return;
+  const targets = new Set();
+  for (const g of groups) {
+    for (const id of childNotifyTargets(g.child_id)) targets.add(id);
+    for (const id of g.parents) targets.add(id); // les parents dont les nuits changent sont toujours prévenus
+  }
+  const multi = groups.length > 1;
+  const lines = groups.map((g) => `${multi ? `${g.child_name} — ` : ''}${g.changes.map((c) => `${c.label} (${c.from} → ${c.to})`).join(' ; ')}`);
+  notify([...targets], {
+    kind: 'custody',
+    title: `${actor.name} a modifié la garde de ${groups.map((g) => g.child_name).join(', ')}`,
+    body: `${lines.join('\n')}${how ? `\n${how}` : ''}`.slice(0, 600),
+    link: '#/garde',
+  }, actor.id);
+}
 function datesBetween(from, to) {
   const out = [];
   for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
@@ -2302,6 +2322,7 @@ api.put('/custody', (req, res) => {
   const changed = [];
   setNights(dates, kids, parent_id ? Number(parent_id) : null, changed);
   audit.nights(req.user, changed, 'saisie manuelle');
+  notifyCustodyChange(req.user, changed);
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ ok: true });
 });
@@ -2316,6 +2337,14 @@ api.get('/custody/handovers', (req, res) => {
   const rows = db.prepare('SELECT child_id, date, location, time FROM custody_handovers WHERE date>=? AND date<=?').all(from, to);
   res.json(rows.filter((r) => canSeeChild(req.user, r.child_id)));
 });
+function notifyHandover(actor, childId, date, loc, time) {
+  const kid = (db.prepare('SELECT name FROM children WHERE id=?').get(childId) || {}).name || 'l\'enfant';
+  const detail = [loc ? `Lieu : ${loc}` : null, time ? `Heure : ${time}` : null].filter(Boolean).join(' · ');
+  notify(childNotifyTargets(childId), {
+    kind: 'custody', title: `${actor.name} a ${detail ? 'modifié' : 'supprimé'} le lieu/heure d'échange du ${frDay(date)} (${kid})`,
+    body: detail || 'Retour au lieu et à l\'heure habituels.', link: '#/garde',
+  }, actor.id);
+}
 api.put('/custody/handovers', (req, res) => {
   const { child_id, date, location, time } = req.body || {};
   if (!validDate(date)) throw bad('Date invalide.');
@@ -2326,12 +2355,13 @@ api.put('/custody/handovers', (req, res) => {
   const hoBefore = db.prepare('SELECT * FROM custody_handovers WHERE child_id=? AND date=?').get(kids[0], date);
   if (!loc && !t) {
     db.prepare('DELETE FROM custody_handovers WHERE child_id=? AND date=?').run(kids[0], date);
-    if (hoBefore) audit.deleted(req.user, 'handover', hoBefore);
+    if (hoBefore) { audit.deleted(req.user, 'handover', hoBefore); notifyHandover(req.user, kids[0], date, null, null); }
   } else {
     db.prepare(`INSERT INTO custody_handovers(child_id,date,location,time) VALUES(?,?,?,?)
       ON CONFLICT(child_id,date) DO UPDATE SET location=excluded.location, time=excluded.time`).run(kids[0], date, loc, t);
     const hoAfter = db.prepare('SELECT * FROM custody_handovers WHERE child_id=? AND date=?').get(kids[0], date);
     if (hoBefore) audit.updated(req.user, 'handover', hoBefore, hoAfter); else audit.created(req.user, 'handover', hoAfter);
+    if (!hoBefore || hoBefore.location !== hoAfter.location || hoBefore.time !== hoAfter.time) notifyHandover(req.user, kids[0], date, loc, t);
   }
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ ok: true });
@@ -2387,6 +2417,7 @@ api.post('/custody/generate', (req, res) => {
     setNights(dates.filter((_, i) => seq[i % seq.length] === 'B'), kids, b, changed);
   }
   audit.nights(req.user, changed, `génération « ${pattern} » du ${start} au ${end}`);
+  notifyCustodyChange(req.user, changed, `Planning généré du ${frDay(start)} au ${frDay(end)}.`);
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ nights: dates.length * kids.length });
 });
@@ -2423,6 +2454,7 @@ api.get('/custody/stats/detail', (req, res) => {
 });
 
 /* Demandes d'échange de garde */
+const swapPeriod = (s) => (s.date_from === s.date_to ? `Nuit du ${frDay(s.date_from)}` : `Du ${frDay(s.date_from)} au ${frDay(s.date_to)}`);
 api.get('/swaps', (req, res) => {
   const rows = db.prepare('SELECT * FROM swap_requests WHERE requester_id=? OR recipient_id=? ORDER BY id DESC LIMIT 40').all(req.user.id, req.user.id);
   res.json(rows.map((r) => ({ ...r, child_ids: parseJ(r.child_ids, []) })));
@@ -2442,7 +2474,7 @@ api.post('/swaps', (req, res) => {
     .run(req.user.id, rid, JSON.stringify(kids), date_from, date_to, np, message ? String(message).trim().slice(0, 500) : null,
       location ? String(location).trim().slice(0, 200) : null, time || null);
   const detail = [location ? `Lieu : ${location}` : null, time ? `Heure : ${time}` : null].filter(Boolean).join(' · ');
-  notify([rid], { kind: 'swap', title: `${req.user.name} demande un échange de garde`, body: `Du ${date_from} au ${date_to}${detail ? ' — ' + detail : ''}`, link: '#/garde' });
+  notify([rid], { kind: 'swap', title: `${req.user.name} demande un échange de garde`, body: `${swapPeriod({ date_from, date_to })}${detail ? ' — ' + detail : ''}`, link: '#/garde' });
   emitTo([req.user.id, rid], { type: 'refresh', what: 'swaps' });
   res.json({ id: r.lastInsertRowid });
 });
@@ -2458,7 +2490,7 @@ api.post('/swaps/:id/answer', (req, res) => {
     setNights(datesBetween(s.date_from, s.date_to), parseJ(s.child_ids, []).filter(childExists), s.new_parent_id, changed);
     audit.nights(req.user, changed, `échange accepté (demandé par ${(db.prepare('SELECT name FROM users WHERE id=?').get(s.requester_id) || {}).name || '?'})`);
   }
-  notify([s.requester_id], { kind: 'swap', title: `${req.user.name} a ${accept ? 'accepté' : 'refusé'} votre demande d'échange`, body: `Du ${s.date_from} au ${s.date_to}`, link: '#/garde' });
+  notify([s.requester_id], { kind: 'swap', title: `${req.user.name} a ${accept ? 'accepté' : 'refusé'} votre demande d'échange`, body: swapPeriod(s), link: '#/garde' });
   emitTo(db.prepare('SELECT id FROM users').all().map((u) => u.id), { type: 'refresh', what: 'custody' });
   res.json({ ok: true });
 });
@@ -2468,6 +2500,47 @@ api.post('/swaps/:id/cancel', (req, res) => {
   if (!s || s.requester_id !== req.user.id) throw new HttpError(404, 'Demande introuvable.');
   const r = db.prepare("UPDATE swap_requests SET status='cancelled', answered_at=datetime('now') WHERE id=? AND status='pending'").run(s.id);
   if (!r.changes) throw new HttpError(409, 'Cette demande a déjà été traitée.');
+  notify([s.recipient_id], { kind: 'swap', title: `${req.user.name} a annulé sa demande d'échange`, body: swapPeriod(s), link: '#/garde' });
+  emitTo([s.requester_id, s.recipient_id], { type: 'refresh', what: 'swaps' });
+  res.json({ ok: true });
+});
+
+// Modifier une demande encore en attente (dates, qui aura les enfants, lieu, heure, message). Les enfants et le
+// destinataire ne changent pas : pour cela, annuler et refaire une demande. Le destinataire est prévenu.
+api.put('/swaps/:id', (req, res) => {
+  const s = db.prepare('SELECT * FROM swap_requests WHERE id=?').get(Number(req.params.id));
+  if (!s || s.requester_id !== req.user.id) throw new HttpError(404, 'Demande introuvable.');
+  if (s.status !== 'pending') throw new HttpError(409, 'Cette demande a déjà été traitée : elle ne peut plus être modifiée.');
+  const b = req.body || {};
+  const dateFrom = b.date_from !== undefined ? b.date_from : s.date_from;
+  const dateTo = b.date_to !== undefined ? b.date_to : s.date_to;
+  if (!validDate(dateFrom) || !validDate(dateTo) || dateTo < dateFrom) throw bad('Dates invalides.');
+  if (datesBetween(dateFrom, dateTo).length > 400) throw bad('Période trop longue.');
+  const time = b.time !== undefined ? (b.time || null) : s.time;
+  if (time && !validTime(time)) throw bad('Heure invalide.');
+  const np = b.new_parent_id !== undefined ? Number(b.new_parent_id) : s.new_parent_id;
+  if (np !== s.requester_id && np !== s.recipient_id) throw bad('Le parent concerné doit être vous ou le destinataire.');
+  const kids = parseJ(s.child_ids, []).filter(childExists);
+  checkCustodyParent(kids, np);
+  const location = b.location !== undefined ? (b.location ? String(b.location).trim().slice(0, 200) : null) : s.location;
+  const message = b.message !== undefined ? (b.message ? String(b.message).trim().slice(0, 500) : null) : s.message;
+  const r = db.prepare("UPDATE swap_requests SET date_from=?, date_to=?, new_parent_id=?, location=?, time=?, message=? WHERE id=? AND status='pending'")
+    .run(dateFrom, dateTo, np, location, time, message, s.id);
+  if (!r.changes) throw new HttpError(409, 'Cette demande a déjà été traitée : elle ne peut plus être modifiée.');
+  const detail = [location ? `Lieu : ${location}` : null, time ? `Heure : ${time}` : null].filter(Boolean).join(' · ');
+  notify([s.recipient_id], { kind: 'swap', title: `${req.user.name} a modifié sa demande d'échange`, body: `${swapPeriod({ date_from: dateFrom, date_to: dateTo })} · chez ${(db.prepare('SELECT name FROM users WHERE id=?').get(np) || {}).name || '?'}${detail ? ' — ' + detail : ''}`, link: '#/garde' });
+  emitTo([s.requester_id, s.recipient_id], { type: 'refresh', what: 'swaps' });
+  res.json({ ok: true });
+});
+
+// Supprimer une demande de son historique (quel que soit son état). Si elle avait été acceptée, les nuits
+// déjà changées ne reviennent PAS en arrière (le planning reste tel quel : à corriger dans la grille). Le
+// destinataire est prévenu.
+api.delete('/swaps/:id', (req, res) => {
+  const s = db.prepare('SELECT * FROM swap_requests WHERE id=?').get(Number(req.params.id));
+  if (!s || s.requester_id !== req.user.id) throw new HttpError(404, 'Demande introuvable.');
+  db.prepare('DELETE FROM swap_requests WHERE id=?').run(s.id);
+  notify([s.recipient_id], { kind: 'swap', title: `${req.user.name} a supprimé sa demande d'échange`, body: `${swapPeriod(s)}${s.status === 'pending' ? '' : ' (déjà traitée)'}`, link: '#/garde' });
   emitTo([s.requester_id, s.recipient_id], { type: 'refresh', what: 'swaps' });
   res.json({ ok: true });
 });

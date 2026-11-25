@@ -243,6 +243,33 @@ export async function garde(root) {
     });
   }
 
+  // Modifier une demande encore en attente : seuls dates, qui aura les enfants, lieu, heure et message changent
+  // (enfants et destinataire : annuler et refaire une demande). L'autre parent est prévenu.
+  function swapEditForm(s) {
+    const me = state.me.user.id;
+    formModal("Modifier la demande d'échange", [
+      { name: 'new_parent_id', label: 'Qui aura les enfants ?', type: 'select', value: s.new_parent_id, options: [opt(me, 'Moi'), opt(s.recipient_id, userName(s.recipient_id))] },
+      { name: 'date_from', label: 'Première nuit', type: 'date', value: s.date_from, required: true },
+      { name: 'date_to', label: 'Dernière nuit', type: 'date', value: s.date_to, required: true },
+      { name: 'location', label: 'Lieu de transition (si différent de d\'habitude)', value: s.location || '' },
+      { name: 'time', label: 'Heure de transition (si différente)', type: 'time', value: s.time || '' },
+      { name: 'message', label: 'Message (facultatif)', type: 'textarea', value: s.message || '' },
+    ], {
+      submit: 'Enregistrer',
+      onSubmit: async (v, close) => {
+        await put(`/swaps/${s.id}`, { ...v, new_parent_id: Number(v.new_parent_id) });
+        close(); toast(`Demande modifiée. ${userName(s.recipient_id)} est prévenu(e).`); load();
+      },
+    });
+  }
+
+  async function deleteSwap(s) {
+    const msg = s.status === 'accepted'
+      ? "Supprimer cette demande de l'historique ? Le planning ne sera PAS modifié (les nuits restent comme elles sont)."
+      : 'Supprimer cette demande ?';
+    if (await confirmBox(msg)) act(async () => { await del(`/swaps/${s.id}`); toast('Demande supprimée'); load(); });
+  }
+
   function drawStats() {
     if (!gardeChildren().length) { mount(statsBox, ); return; }
     mount(statsBox, h('div', { class: 'row between center' }, h('h2', null, 'Répartition des nuits'),
@@ -294,9 +321,12 @@ export async function garde(root) {
         s.recipient_id === me ? h('div', { class: 'row gap' },
           h('button', { class: 'btn primary small', onclick: () => act(async () => { await post(`/swaps/${s.id}/answer`, { accept: true }); toast('Échange accepté, planning mis à jour'); load(); }) }, 'Accepter'),
           h('button', { class: 'btn small', onclick: () => act(async () => { await post(`/swaps/${s.id}/answer`, { accept: false }); load(); }) }, 'Refuser'))
-          : h('button', { class: 'btn small', onclick: () => act(async () => { await post(`/swaps/${s.id}/cancel`); load(); }) }, 'Annuler la demande'))))
+          : h('div', { class: 'row gap' },
+            h('button', { class: 'btn small', onclick: () => swapEditForm(s) }, 'Modifier'),
+            h('button', { class: 'btn small', onclick: () => act(async () => { await post(`/swaps/${s.id}/cancel`); toast('Demande annulée'); load(); }) }, 'Annuler la demande')))))
         : h('p', { class: 'muted' }, 'Aucune demande en attente.'),
-      past.length ? h('ul', { class: 'swap-history' }, past.map((s) => h('li', null, h('span', { class: 'status ' + s.status }, STATUS[s.status]), ` ${line(s)} `, h('span', { class: 'muted' }, `· ${ago(s.answered_at || s.created_at)}`)))) : null);
+      past.length ? h('ul', { class: 'swap-history' }, past.map((s) => h('li', null, h('span', { class: 'status ' + s.status }, STATUS[s.status]), ` ${line(s)} `, h('span', { class: 'muted' }, `· ${ago(s.answered_at || s.created_at)}`),
+        s.requester_id === me ? h('button', { class: 'icon-btn', 'aria-label': 'Supprimer cette demande', onclick: () => deleteSwap(s) }, icon('trash', 14)) : null))) : null);
   }
 
   function drawHolidays() {

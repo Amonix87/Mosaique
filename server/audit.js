@@ -197,14 +197,16 @@ function ranges(dates) {
   const text = out.join(', ');
   return text.length > 400 ? `${text.slice(0, 400)}…` : text;
 }
-function nights(actor, collected, how, extra = {}) {
-  if (!collected || !collected.length) return;
+// Nuits réellement modifiées, regroupées par enfant puis par changement (« Marie → Jean-Paul : 14 nuits… ») :
+// sert au journal ci-dessous et à la notification envoyée à l'autre parent (un seul message par saisie).
+function groupNights(collected) {
   const byChild = new Map();
-  for (const n of collected) {
+  for (const n of collected || []) {
     if (n.from === n.to) continue;
     if (!byChild.has(n.child_id)) byChild.set(n.child_id, []);
     byChild.get(n.child_id).push(n);
   }
+  const out = [];
   for (const [childId, list] of byChild) {
     const groups = new Map();
     for (const n of list) {
@@ -217,12 +219,22 @@ function nights(actor, collected, how, extra = {}) {
       from: show(g.from, uname), to: show(g.to, uname),
     }));
     const all = list.map((n) => n.date).sort();
+    out.push({
+      child_id: childId, child_name: cname(childId), count: list.length, changes,
+      period: `${DATE(all[0])}${all[0] !== all[all.length - 1] ? ` → ${DATE(all[all.length - 1])}` : ''}`,
+      parents: [...new Set(list.flatMap((n) => [n.from, n.to]).filter((x) => x))],
+    });
+  }
+  return out;
+}
+function nights(actor, collected, how, extra = {}) {
+  for (const g of groupNights(collected)) {
     insert(actor, extra.via, {
-      area: 'garde', action: 'update', entity: 'custody', entity_id: childId, child_id: childId, circle_id: null,
-      summary: `Garde de ${cname(childId)} : ${list.length} nuit${list.length > 1 ? 's' : ''} modifiée${list.length > 1 ? 's' : ''} (${DATE(all[0])}${all[0] !== all[all.length - 1] ? ` → ${DATE(all[all.length - 1])}` : ''}) — ${how}`,
-      changes,
+      area: 'garde', action: 'update', entity: 'custody', entity_id: g.child_id, child_id: g.child_id, circle_id: null,
+      summary: `Garde de ${g.child_name} : ${g.count} nuit${g.count > 1 ? 's' : ''} modifiée${g.count > 1 ? 's' : ''} (${g.period}) — ${how}`,
+      changes: g.changes,
     });
   }
 }
 
-module.exports = { created, updated, deleted, note, nights, diff, ENTITIES, _ranges: ranges };
+module.exports = { created, updated, deleted, note, nights, groupNights, diff, ENTITIES, _ranges: ranges };

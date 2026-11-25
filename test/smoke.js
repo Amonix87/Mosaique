@@ -635,6 +635,49 @@ async function main() {
     const s2 = (await alice.post('/api/swaps', { recipient_id: B, child_ids: [kid1], date_from: '2026-10-20', date_to: '2026-10-21', new_parent_id: B })).body.id;
     ok(await alice.post(`/api/swaps/${s2}/cancel`), 200);
     ok(await bob.post(`/api/swaps/${s2}/answer`, { accept: true }), 409, 'demande annulée');
+    const bobNotifs = async (needle) => (await bob.get('/api/notifications')).body.filter((n) => n.title.includes(needle));
+    assert.strictEqual((await bobNotifs("a annulé sa demande d'échange")).length, 1, "l'annulation prévient le destinataire");
+
+    // Modification / suppression d'une demande, notifications de garde groupées
+    const s3 = (await alice.post('/api/swaps', { recipient_id: B, child_ids: [kid1], date_from: '2026-12-04', date_to: '2026-12-06', new_parent_id: B })).body.id;
+    ok(await bob.put(`/api/swaps/${s3}`, { date_to: '2026-12-07' }), 404, "seul le demandeur peut modifier");
+    ok(await alice.put(`/api/swaps/${s3}`, { date_from: '2026-12-08', date_to: '2026-12-07' }), 400, 'dates incohérentes');
+    ok(await alice.put(`/api/swaps/${s3}`, { new_parent_id: C }), 400, 'parent hors échange');
+    ok(await alice.put(`/api/swaps/${s3}`, { time: '99:99' }), 400, 'heure invalide');
+    ok(await alice.put(`/api/swaps/${s3}`, { date_to: '2026-12-07', location: 'À la gare', message: 'Finalement une nuit de plus' }), 200, 'modification');
+    const s3d = (await bob.get('/api/swaps')).body.find((x) => x.id === s3);
+    assert.strictEqual(s3d.date_to, '2026-12-07'); assert.strictEqual(s3d.location, 'À la gare'); assert.strictEqual(s3d.child_ids.length, 1);
+    const modif = await bobNotifs("a modifié sa demande d'échange");
+    assert.strictEqual(modif.length, 1, 'la modification prévient le destinataire');
+    assert.ok(modif[0].body.includes('04/12') && modif[0].body.includes('07/12'), 'dates en français dans la notification');
+    ok(await bob.post(`/api/swaps/${s3}/answer`, { accept: false }), 200, 'refus');
+    ok(await alice.put(`/api/swaps/${s3}`, { date_to: '2026-12-09' }), 409, 'plus modifiable une fois traitée');
+    ok(await bob.del(`/api/swaps/${s3}`), 404, "seul le demandeur peut supprimer");
+    ok(await alice.del(`/api/swaps/${s3}`), 200, 'suppression');
+    assert.strictEqual((await bobNotifs("a supprimé sa demande d'échange")).length, 1, 'la suppression prévient le destinataire');
+    assert.ok(!(await bob.get('/api/swaps')).body.some((x) => x.id === s3), 'demande supprimée');
+    ok(await alice.del(`/api/swaps/${s3}`), 404, 'déjà supprimée');
+
+    // Un changement de garde = UNE notification groupée pour l'autre parent, même pour plusieurs nuits / enfants
+    const custNotifs = async () => (await bob.get('/api/notifications')).body.filter((n) => n.kind === 'custody' && n.title.includes('a modifié la garde'));
+    const c0 = (await custNotifs()).length;
+    ok(await alice.put('/api/custody', { date_from: '2026-12-14', date_to: '2026-12-18', child_ids: [kid1], parent_id: A }), 200);
+    let cn = await custNotifs();
+    assert.strictEqual(cn.length, c0 + 1, 'cinq nuits modifiées = une seule notification');
+    assert.ok(cn[0].title.includes('Alice') || cn[0].title.includes('a modifié la garde'), 'titre explicite');
+    assert.ok(/5 nuit/.test(cn[0].body), 'la notification résume le nombre de nuits : ' + cn[0].body);
+    ok(await alice.put('/api/custody', { date_from: '2026-12-14', date_to: '2026-12-18', child_ids: [kid1], parent_id: A }), 200);
+    assert.strictEqual((await custNotifs()).length, c0 + 1, 'aucune nuit réellement changée = pas de notification');
+    ok(await alice.put('/api/custody', { date_from: '2026-12-21', date_to: '2026-12-22', child_ids: [kid1, kid2], parent_id: A }), 200);
+    assert.strictEqual((await custNotifs()).length, c0 + 2, 'deux enfants en une saisie = une seule notification');
+    const hn = async () => (await bob.get('/api/notifications')).body.filter((n) => n.title.includes("lieu/heure d'échange")).length;
+    const h0 = await hn();
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-12-24', location: 'Chez mamie', time: '17:00' }), 200);
+    assert.strictEqual(await hn(), h0 + 1, 'nouveau lieu/heure ponctuel notifié');
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-12-24', location: 'Chez mamie', time: '17:00' }), 200);
+    assert.strictEqual(await hn(), h0 + 1, 'enregistrer sans rien changer ne notifie pas');
+    ok(await alice.put('/api/custody/handovers', { child_id: kid1, date: '2026-12-24', location: '', time: '' }), 200);
+    assert.strictEqual(await hn(), h0 + 2, 'suppression notifiée');
 
     // SOS remplacement : le premier qui accepte gagne
     const sosId = (await alice.post('/api/sos', { circle_id: circle, title: 'Aller chercher Léo à 17h', note: 'Bloquée au travail' })).body.id;
