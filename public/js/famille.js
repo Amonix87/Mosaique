@@ -142,6 +142,28 @@ function childForm(c, done) {
   });
 }
 
+// Retirer un membre qui a déjà servi supprime aussi ce qu'il a créé (dépenses payées, remboursements, nuits de
+// garde…) : le serveur refuse d'abord et décrit ce qui disparaîtrait ; on le montre avant de redemander confirmation.
+const FOOTPRINT_LABELS = [['expenses', 'dépense payée', 'dépenses payées'], ['recurring', 'dépense récurrente', 'dépenses récurrentes'], ['settlements', 'remboursement', 'remboursements'],
+  ['nights', 'nuit de garde', 'nuits de garde'], ['posts', 'publication du fil', 'publications du fil'], ['messages', 'message', 'messages']];
+async function removeMember(u, refresh) {
+  if (u.claimed === false) {
+    if (!(await confirmBox(`Annuler l'invitation de ${u.name} ?`))) return;
+    return act(async () => { await del(`/users/${u.id}`); toast('Invitation annulée'); refresh(); });
+  }
+  if (!(await confirmBox(`Retirer ${u.name} de la famille ?`, 'Continuer'))) return;
+  await act(async () => {
+    try { await del(`/users/${u.id}`); } catch (e) {
+      if (e.status !== 409 || !e.data || !e.data.footprint) throw e;
+      const lines = FOOTPRINT_LABELS.filter(([k]) => e.data.footprint[k] > 0).map(([k, one, many]) => `${e.data.footprint[k]} ${e.data.footprint[k] > 1 ? many : one}`);
+      const ok = await confirmBox(`${u.name} a déjà des données dans Mosaïque. Les retirer de la famille les supprime définitivement : ${lines.join(', ')}. Les soldes du budget des autres membres en seront modifiés. Cette action est irréversible — pensez à télécharger une sauvegarde avant (Réglages).`, 'Tout supprimer');
+      if (!ok) return;
+      await del(`/users/${u.id}?force=1`);
+    }
+    toast('Membre retiré'); refresh();
+  });
+}
+
 function memberEditForm(u, done) {
   const usedColors = new Set(state.users.filter((x) => x.id !== u.id).map((x) => x.color.toLowerCase()));
   const availableColors = TILE_COLORS.filter((x) => !usedColors.has(x.toLowerCase()));
@@ -179,7 +201,7 @@ export async function famille(root) {
           u.claimed === false ? h('button', { class: 'btn small', onclick: () => reinviteLink(u, refresh) }, icon('copy', 14), 'Lien') : null,
           (u.id !== me.id && u.claimed !== false) ? h('button', { class: 'btn small', onclick: () => passwordForm(u) }, 'Mot de passe') : null,
           u.id !== me.id ? h('button', { class: 'btn small', onclick: () => act(async () => { await put(`/users/${u.id}/admin`, { is_admin: !u.is_admin }); toast('Rôle mis à jour'); refresh(); }) }, u.is_admin ? 'Retirer admin' : 'Rendre admin') : null,
-          u.id !== me.id ? h('button', { class: 'icon-btn', 'aria-label': 'Retirer', onclick: async () => { if (await confirmBox(u.claimed === false ? `Annuler l'invitation de ${u.name} ?` : `Retirer ${u.name} de la famille ? Ses contributions resteront visibles.`)) act(async () => { await del(`/users/${u.id}`); toast(u.claimed === false ? 'Invitation annulée' : 'Membre retiré'); refresh(); }); } }, icon('trash', 16)) : null)
+          u.id !== me.id ? h('button', { class: 'icon-btn', 'aria-label': 'Retirer', onclick: () => removeMember(u, refresh) }, icon('trash', 16)) : null)
           : null))),
       me.is_admin ? h('button', { class: 'btn primary', onclick: () => inviteForm(circles, refresh) }, icon('plus', 16), 'Ajouter un membre') : null));
 

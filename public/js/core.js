@@ -114,7 +114,7 @@ export async function api(method, url, body) {
   try { res = await fetch('/api' + url, opts); } catch { throw new Error('Serveur injoignable. Vérifiez votre connexion.'); }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && state.me) { window.dispatchEvent(new Event('mq:expired')); throw new Error('Session expirée, reconnectez-vous.'); }
-  if (!res.ok) throw new Error(data.error || 'Une erreur est survenue.');
+  if (!res.ok) { const err = new Error(data.error || 'Une erreur est survenue.'); err.status = res.status; err.data = data; throw err; }
   return data;
 }
 export const get = (u) => api('GET', u);

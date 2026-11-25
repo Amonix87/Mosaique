@@ -27,6 +27,8 @@ services:
       - TRUST_PROXY=1
       # Emplacement de stockage des photos du fil familial (voir le volume ci-dessus).
       - MEDIA_DIR=/media
+      # Fuseau horaire (Europe/Paris par défaut dans l'image) : change l'heure des rappels et des récaps.
+      # - TZ=Europe/Paris
 
       # --- Notifications par e-mail (facultatif) ---
       # Renseignez ces variables pour permettre à chacun d'activer, dans son compte,

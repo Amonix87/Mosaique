@@ -152,7 +152,7 @@ test/     Test de bout en bout de l'API
 
 ## Limites connues
 
-- Une seule langue (français) et un seul fuseau horaire (celui du serveur)
+- Une seule langue (français) et un seul fuseau horaire (celui du serveur : `Europe/Paris` dans l'image Docker, modifiable avec la variable `TZ`)
 - Pas d'application native sur les magasins d'applications (App Store / Play Store) — mais installable comme une application depuis le navigateur (voir plus haut)
 - Les notifications push nécessitent une session de navigation normale (pas privée), et sur iPhone, que l'application ait été ajoutée à l'écran d'accueil au préalable
 

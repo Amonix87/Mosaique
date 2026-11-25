@@ -130,7 +130,11 @@ function notifBell() {
   };
   return btn;
 }
-function refreshBell() { const b = $('.notif-btn'); if (!b) return; const s = $('.badge', b); if (s) s.remove(); }
+function refreshBell() {
+  const b = $('.notif-btn'); if (!b) return;
+  const s = $('.badge', b); if (s) s.remove();
+  if (state.unread) b.append(h('span', { class: 'badge' }, state.unread > 9 ? '9+' : state.unread));
+}
 
 function currentPath() {
   const h1 = location.hash.replace(/^#\/?/, '');
@@ -174,12 +178,10 @@ function connectStream() {
     const data = JSON.parse(ev.data);
     if (data.type === 'refresh') dispatchRefresh(data.what);
     else if (data.type === 'chat') emitChat(data.message);
-    else if (data.type === 'notify') { state.unread++; toast(data.title); refreshBadgeSoon(); }
+    else if (data.type === 'notify') { state.unread++; toast(data.title); refreshBell(); }
   };
   stream.onerror = () => { stream.close(); setTimeout(connectStream, 4000); };
 }
-let badgeTimer;
-function refreshBadgeSoon() { clearTimeout(badgeTimer); badgeTimer = setTimeout(() => router(), 50); }
 
 async function logout() { await post('/logout'); if (stream) stream.close(); state.me = null; boot(); }
 

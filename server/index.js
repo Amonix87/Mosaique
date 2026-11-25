@@ -419,6 +419,8 @@ api.put('/me', (req, res) => {
     if (String(new_password).length < 8) throw bad('Mot de passe : 8 caractères minimum.');
     if (!bcrypt.compareSync(String(current_password || ''), req.user.pass_hash)) throw bad('Mot de passe actuel incorrect.');
     db.prepare('UPDATE users SET pass_hash=? WHERE id=?').run(bcrypt.hashSync(String(new_password), 11), req.user.id);
+    // Une session volée ne doit pas survivre au changement de mot de passe : seule la session courante est conservée.
+    db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash!=?').run(req.user.id, sha(parseCookies(req).mq_session || ''));
   }
   res.json({ ok: true });
 });
@@ -583,10 +585,42 @@ api.post('/users/:id/reinvite', requireAdmin, (req, res) => {
   res.json({ token });
 });
 
+// Retirer un membre qui a déjà servi supprime, en cascade (clés étrangères), tout ce qu'il a créé : les
+// dépenses qu'il a payées (donc les soldes des autres changent), ses remboursements, ses nuits de garde,
+// ses messages. On ne le fait donc qu'en connaissance de cause : sans ?force=1, la route refuse et décrit
+// ce qui disparaîtrait (l'écran le montre avant de redemander confirmation).
+function memberFootprint(id) {
+  const n = (sql) => db.prepare(sql).get(id, id).n;
+  return {
+    expenses: db.prepare('SELECT COUNT(*) n FROM expenses WHERE paid_by=?').get(id).n,
+    recurring: db.prepare('SELECT COUNT(*) n FROM recurring_expenses WHERE paid_by=?').get(id).n,
+    settlements: n('SELECT COUNT(*) n FROM settlements WHERE from_user=? OR to_user=?'),
+    nights: db.prepare('SELECT COUNT(*) n FROM custody_nights WHERE parent_id=?').get(id).n,
+    posts: db.prepare('SELECT COUNT(*) n FROM posts WHERE created_by=?').get(id).n,
+    messages: db.prepare('SELECT COUNT(*) n FROM messages WHERE created_by=?').get(id).n,
+  };
+}
 api.delete('/users/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   if (id === req.user.id) throw bad('Vous ne pouvez pas supprimer votre propre compte.');
-  db.prepare('DELETE FROM users WHERE id=?').run(id);
+  const target = db.prepare('SELECT * FROM users WHERE id=?').get(id);
+  if (!target) throw new HttpError(404, 'Introuvable.');
+  const footprint = target.claimed ? memberFootprint(id) : null; // une invitation non activée n'a rien produit
+  if (footprint && Object.values(footprint).some((v) => v > 0) && req.query.force !== '1') {
+    return res.status(409).json({ error: 'Ce membre a des données qui seraient supprimées avec lui.', footprint });
+  }
+  db.transaction(() => {
+    // Les listes de parents / lecteurs sont du JSON (pas de clé étrangère) : on y retire ce membre, sauf si
+    // c'était le seul parent désigné — la liste vide ouvrirait l'enfant à tout le monde, ce qui serait pire.
+    for (const c of db.prepare('SELECT id, parent_ids, viewer_ids FROM children').all()) {
+      const pids = parseJ(c.parent_ids, []); const vids = parseJ(c.viewer_ids, []);
+      const nextP = pids.filter((x) => x !== id); const nextV = vids.filter((x) => x !== id);
+      if (nextP.length === pids.length && nextV.length === vids.length) continue;
+      db.prepare('UPDATE children SET parent_ids=?, viewer_ids=? WHERE id=?')
+        .run(JSON.stringify(nextP.length || !pids.length ? nextP : pids), JSON.stringify(nextV), c.id);
+    }
+    db.prepare('DELETE FROM users WHERE id=?').run(id);
+  })();
   res.json({ ok: true });
 });
 
@@ -709,51 +743,61 @@ api.put('/children/:id', (req, res) => {
   const { name, color, birthdate, parent_ids, viewer_ids, zone, shared_custody, handover_location, handover_time, blood_type, allergies, doctor_name, doctor_phone } = req.body || {};
   const id = Number(req.params.id);
   const childBefore = db.prepare('SELECT * FROM children WHERE id=?').get(id);
-  if (name !== undefined) db.prepare('UPDATE children SET name=? WHERE id=?').run(String(name).trim().slice(0, 60), id);
-  if (color !== undefined && HEX.test(color)) {
-    if (colorTakenByAnotherChild(color, id)) throw bad('Cette couleur est déjà utilisée par un autre enfant.');
-    db.prepare('UPDATE children SET color=? WHERE id=?').run(color, id);
-  }
-  if (birthdate !== undefined) {
-    if (birthdate && !validDate(birthdate)) throw bad('Date de naissance invalide.');
-    db.prepare('UPDATE children SET birthdate=? WHERE id=?').run(birthdate || null, id);
-  }
-  if (zone !== undefined) {
-    if (!['A', 'B', 'C'].includes(zone)) throw bad('Zone scolaire invalide.');
-    db.prepare('UPDATE children SET zone=? WHERE id=?').run(zone, id);
-  }
-  if (shared_custody !== undefined) {
-    db.prepare('UPDATE children SET shared_custody=? WHERE id=?').run(shared_custody ? 1 : 0, id);
-  }
-  if (handover_location !== undefined) {
-    db.prepare('UPDATE children SET handover_location=? WHERE id=?').run(handover_location ? String(handover_location).trim().slice(0, 200) : null, id);
-  }
-  if (handover_time !== undefined) {
-    if (handover_time && !validTime(handover_time)) throw bad('Heure de transition invalide.');
-    db.prepare('UPDATE children SET handover_time=? WHERE id=?').run(handover_time || null, id);
-  }
-  if (parent_ids !== undefined) {
-    if (!req.user.is_admin) throw new HttpError(403, "Seul un administrateur peut désigner les parents d'un enfant.");
-    db.prepare('UPDATE children SET parent_ids=? WHERE id=?').run(JSON.stringify(validateParentIds(parent_ids)), id);
-  }
-  if (viewer_ids !== undefined) {
-    if (!req.user.is_admin) throw new HttpError(403, "Seul un administrateur peut désigner les lecteurs d'un enfant.");
-    db.prepare('UPDATE children SET viewer_ids=? WHERE id=?').run(JSON.stringify(validateParentIds(viewer_ids)), id);
-  }
-  if (blood_type !== undefined) {
-    if (blood_type && !BLOOD_TYPES.includes(blood_type)) throw bad('Groupe sanguin invalide.');
-    db.prepare('UPDATE children SET blood_type=? WHERE id=?').run(blood_type || null, id);
-  }
-  if (allergies !== undefined) {
-    db.prepare('UPDATE children SET allergies=? WHERE id=?').run(allergies ? String(allergies).trim().slice(0, 1000) : null, id);
-  }
-  if (doctor_name !== undefined) {
-    db.prepare('UPDATE children SET doctor_name=? WHERE id=?').run(doctor_name ? String(doctor_name).trim().slice(0, 200) : null, id);
-  }
-  if (doctor_phone !== undefined) {
-    db.prepare('UPDATE children SET doctor_phone=? WHERE id=?').run(doctor_phone ? String(doctor_phone).trim().slice(0, 50) : null, id);
-  }
-  if (childBefore) audit.updated(req.user, 'child', childBefore, db.prepare('SELECT * FROM children WHERE id=?').get(id));
+  if (!childBefore) throw new HttpError(404, 'Introuvable.');
+  // Même règle que pour la garde et l'agenda : parents désignés et administrateurs (ou tout le monde tant
+  // qu'aucun parent n'est désigné). Un·e lecteur·rice, ou quelqu'un qui ne voit même pas l'enfant, ne le modifie pas.
+  if (!canEditChild(req.user, id)) throw new HttpError(403, "Vous n'avez pas le droit de modifier cet enfant.");
+  // Tout ou rien : une valeur refusée en milieu de formulaire ne doit pas laisser les précédentes enregistrées.
+  db.transaction(() => {
+    if (name !== undefined) {
+      if (!String(name).trim()) throw bad('Le prénom est requis.');
+      db.prepare('UPDATE children SET name=? WHERE id=?').run(String(name).trim().slice(0, 60), id);
+    }
+    if (color !== undefined && HEX.test(color)) {
+      if (colorTakenByAnotherChild(color, id)) throw bad('Cette couleur est déjà utilisée par un autre enfant.');
+      db.prepare('UPDATE children SET color=? WHERE id=?').run(color, id);
+    }
+    if (birthdate !== undefined) {
+      if (birthdate && !validDate(birthdate)) throw bad('Date de naissance invalide.');
+      db.prepare('UPDATE children SET birthdate=? WHERE id=?').run(birthdate || null, id);
+    }
+    if (zone !== undefined) {
+      if (!['A', 'B', 'C'].includes(zone)) throw bad('Zone scolaire invalide.');
+      db.prepare('UPDATE children SET zone=? WHERE id=?').run(zone, id);
+    }
+    if (shared_custody !== undefined) {
+      db.prepare('UPDATE children SET shared_custody=? WHERE id=?').run(shared_custody ? 1 : 0, id);
+    }
+    if (handover_location !== undefined) {
+      db.prepare('UPDATE children SET handover_location=? WHERE id=?').run(handover_location ? String(handover_location).trim().slice(0, 200) : null, id);
+    }
+    if (handover_time !== undefined) {
+      if (handover_time && !validTime(handover_time)) throw bad('Heure de transition invalide.');
+      db.prepare('UPDATE children SET handover_time=? WHERE id=?').run(handover_time || null, id);
+    }
+    if (parent_ids !== undefined) {
+      if (!req.user.is_admin) throw new HttpError(403, "Seul un administrateur peut désigner les parents d'un enfant.");
+      db.prepare('UPDATE children SET parent_ids=? WHERE id=?').run(JSON.stringify(validateParentIds(parent_ids)), id);
+    }
+    if (viewer_ids !== undefined) {
+      if (!req.user.is_admin) throw new HttpError(403, "Seul un administrateur peut désigner les lecteurs d'un enfant.");
+      db.prepare('UPDATE children SET viewer_ids=? WHERE id=?').run(JSON.stringify(validateParentIds(viewer_ids)), id);
+    }
+    if (blood_type !== undefined) {
+      if (blood_type && !BLOOD_TYPES.includes(blood_type)) throw bad('Groupe sanguin invalide.');
+      db.prepare('UPDATE children SET blood_type=? WHERE id=?').run(blood_type || null, id);
+    }
+    if (allergies !== undefined) {
+      db.prepare('UPDATE children SET allergies=? WHERE id=?').run(allergies ? String(allergies).trim().slice(0, 1000) : null, id);
+    }
+    if (doctor_name !== undefined) {
+      db.prepare('UPDATE children SET doctor_name=? WHERE id=?').run(doctor_name ? String(doctor_name).trim().slice(0, 200) : null, id);
+    }
+    if (doctor_phone !== undefined) {
+      db.prepare('UPDATE children SET doctor_phone=? WHERE id=?').run(doctor_phone ? String(doctor_phone).trim().slice(0, 50) : null, id);
+    }
+  })();
+  audit.updated(req.user, 'child', childBefore, db.prepare('SELECT * FROM children WHERE id=?').get(id));
   res.json({ ok: true });
 });
 api.delete('/children/:id', requireAdmin, (req, res) => {
@@ -886,6 +930,17 @@ function equalSplit(ids) {
 // Règle commune aux dépenses ponctuelles, récurrentes et issues d'un événement : si l'enfant
 // concerné a des parents désignés, eux seuls se partagent la dépense (un beau-parent peut avoir
 // payé et être remboursé sans faire partie du partage). Sans parent désigné, tout le cercle reste éligible.
+// Le payeur et les personnes du partage doivent faire partie du cercle de la dépense — sinon un solde apparaît
+// pour quelqu'un qui n'y voit rien. À la modification, on ne contrôle que ce qui change : une dépense payée par
+// quelqu'un qui a quitté le cercle depuis reste modifiable (titre, date…).
+function assertPeopleInCircle(circleId, payer, split, before) {
+  const members = circleMemberIds(circleId);
+  const knownPayer = before && before.paid_by;
+  if (payer !== undefined && payer !== null && payer !== knownPayer && !members.includes(Number(payer))) throw bad('Le payeur doit faire partie du cercle.');
+  const knownSplit = before ? Object.keys(parseJ(before.split, {})).map(Number) : [];
+  const parts = split ? Object.keys(typeof split === 'string' ? parseJ(split, {}) : split).map(Number) : [];
+  if (parts.some((id) => !members.includes(id) && !knownSplit.includes(id))) throw bad('Les personnes du partage doivent faire partie du cercle.');
+}
 function assertSplitAllowed(childId, split) {
   if (childId === null || childId === undefined) return;
   const child = db.prepare('SELECT * FROM children WHERE id=?').get(childId);
@@ -1118,6 +1173,11 @@ mountResource('events', 'events', {
     // Catégorie et prix : le prix crée/alimente une dépense dans Budget, donc seul le créateur de
     // l'événement peut le poser, le changer ou le retirer (comme pour toute dépense).
     if (b.category !== undefined && b.category !== null && b.category !== '' && !EVENT_CATEGORIES.includes(b.category)) throw bad('Catégorie invalide.');
+    // Mêmes garde-fous qu'à la création (voir validate) : la fin ne précède pas le début, et le rappel reste raisonnable.
+    const nextStart = b.starts_at !== undefined ? String(b.starts_at) : row.starts_at;
+    const nextEnd = b.ends_at !== undefined ? ((b.ends_at === null || b.ends_at === '') ? null : String(b.ends_at)) : row.ends_at;
+    if (nextEnd && nextEnd < nextStart) throw bad('La fin doit être après le début.');
+    if (b.reminder_minutes !== undefined && b.reminder_minutes !== null && b.reminder_minutes !== '' && (Number(b.reminder_minutes) < 0 || Number(b.reminder_minutes) > 43200)) throw bad('Délai de rappel invalide.');
     const nextPrice = b.price_cents !== undefined ? ((b.price_cents === null || b.price_cents === '') ? null : Number(b.price_cents)) : row.price_cents;
     const nextPayer = b.price_paid_by !== undefined ? ((b.price_paid_by === null || b.price_paid_by === '') ? null : Number(b.price_paid_by)) : row.price_paid_by;
     if (nextPayer !== null && !circleMemberIds(row.circle_id).includes(nextPayer)) throw bad('Le payeur doit faire partie du cercle.');
@@ -1607,6 +1667,8 @@ api.delete('/invoices/:id', (req, res) => {
   if (!row) throw new HttpError(404, 'Introuvable.');
   if (!req.user.is_admin) requireMember(req.user, row.circle_id);
   const exp = row.expense_id ? db.prepare('SELECT * FROM expenses WHERE id=?').get(row.expense_id) : null;
+  // Supprimer une facture payée supprime sa dépense : même règle que pour la dépense elle-même (son créateur seul).
+  if (exp && !canModifyOwn(req.user, exp)) throw ownOnly('la dépense de cette facture');
   if (row.expense_id) db.prepare('DELETE FROM expenses WHERE id=?').run(row.expense_id);
   db.prepare('DELETE FROM invoices WHERE id=?').run(row.id);
   audit.deleted(req.user, 'invoice', row);
@@ -1724,9 +1786,10 @@ mountResource('expenses', 'expenses', { title: 's', amount_cents: 'cents', categ
   order: 'ORDER BY date DESC, id DESC',
   filter: (rows) => { const pending = pendingEventIds(); return rows.filter((e) => !e.event_id || !pending.has(e.event_id)); },
   decode: (r) => ({ ...r, split: parseJ(r.split, {}) }),
-  validate: (v) => assertSplitAllowed(v.child_id, parseJ(v.split, {})),
+  validate: (v) => { assertSplitAllowed(v.child_id, parseJ(v.split, {})); assertPeopleInCircle(v.circle_id, v.paid_by, v.split); },
   beforeUpdate: (row, b, sets, vals, req) => {
     if (!canModifyOwn(req.user, row)) throw ownOnly('cette dépense');
+    assertPeopleInCircle(b.circle_id !== undefined ? Number(b.circle_id) : row.circle_id, b.paid_by !== undefined ? Number(b.paid_by) : undefined, b.split, row);
     const rawChild = b.child_id !== undefined ? b.child_id : row.child_id;
     const childId = (rawChild === null || rawChild === '') ? null : Number(rawChild);
     assertSplitAllowed(childId, b.split !== undefined ? b.split : parseJ(row.split, {}));
@@ -1786,10 +1849,12 @@ mountResource('recurring-expenses', 'recurring_expenses', {
   },
   validate: (v) => {
     assertSplitAllowed(v.child_id, parseJ(v.split, {}));
+    assertPeopleInCircle(v.circle_id, v.paid_by, v.split);
     if (v.repeat_until && v.repeat_until < v.start_date) throw bad('La date de fin doit être après le début.');
   },
   beforeUpdate: (row, b, sets, vals, req) => {
     if (!canModifyOwn(req.user, row)) throw ownOnly('cette dépense récurrente');
+    assertPeopleInCircle(b.circle_id !== undefined ? Number(b.circle_id) : row.circle_id, b.paid_by !== undefined ? Number(b.paid_by) : undefined, b.split, row);
     if ((b.start_date !== undefined && b.start_date !== row.start_date) || (b.repeat !== undefined && b.repeat !== row.repeat)) {
       throw bad('Le début et la fréquence ne se modifient pas : supprimez cette dépense récurrente et créez-en une nouvelle.');
     }
@@ -2545,7 +2610,8 @@ app.get('/ical/:token', (req, res) => {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
   const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Mosaique//FR', 'CALSCALE:GREGORIAN', `X-WR-CALNAME:${icsEsc(getSetting('family_name', 'Mosaïque'))}`];
   const circles = myCircles(u.id);
-  const evs = db.prepare(`SELECT * FROM events WHERE circle_id IN (${placeholders(circles)})`).all(...circles);
+  // Mêmes droits que dans l'application : un événement lié à un enfant que la personne ne voit pas n'a rien à faire dans son agenda.
+  const evs = db.prepare(`SELECT * FROM events WHERE circle_id IN (${placeholders(circles)})`).all(...circles).filter((e) => visibleForChildren(u, e.child_ids));
   for (const e of evs) {
     L.push('BEGIN:VEVENT', `UID:ev-${e.id}@mosaique`, `DTSTAMP:${stamp}`, `SUMMARY:${icsEsc(e.title)}`);
     const allDay = e.all_day || e.starts_at.length === 10;
@@ -2558,13 +2624,19 @@ app.get('/ical/:token', (req, res) => {
     if (e.notes) L.push(`DESCRIPTION:${icsEsc(e.notes)}`);
     if (e.repeat !== 'none') {
       const freq = { daily: 'DAILY', weekly: 'WEEKLY', monthly: 'MONTHLY', yearly: 'YEARLY' }[e.repeat];
-      L.push(`RRULE:FREQ=${freq}${e.repeat_until ? `;UNTIL=${icsDate(addDays(e.repeat_until, 1))}` : ''}`);
+      // UNTIL est inclusif (et du même type que DTSTART) : « +1 jour » ajoutait une occurrence de trop aux séries quotidiennes.
+      const until = e.repeat_until ? `;UNTIL=${allDay ? icsDate(e.repeat_until) : `${icsDate(e.repeat_until)}T235959`}` : '';
+      L.push(`RRULE:FREQ=${freq}${until}`);
+      // Occurrences supprimées une à une : sans EXDATE, elles réapparaissent dans l'agenda abonné.
+      for (const d of parseJ(e.exdates, [])) {
+        if (validDate(d)) L.push(allDay ? `EXDATE;VALUE=DATE:${icsDate(d)}` : `EXDATE:${icsDate(d)}T${e.starts_at.slice(11, 13)}${e.starts_at.slice(14, 16)}00`);
+      }
     }
     L.push('END:VEVENT');
   }
   // Nuits de garde regroupées par périodes consécutives
   const today = nowLocal().slice(0, 10);
-  const nights = db.prepare('SELECT * FROM custody_nights WHERE date>=? ORDER BY child_id,date').all(addDays(today, -30));
+  const nights = db.prepare('SELECT * FROM custody_nights WHERE date>=? ORDER BY child_id,date').all(addDays(today, -30)).filter((n) => canSeeChild(u, n.child_id));
   const kids = Object.fromEntries(db.prepare('SELECT id,name FROM children').all().map((c) => [c.id, c.name]));
   const names = Object.fromEntries(db.prepare('SELECT id,name FROM users').all().map((x) => [x.id, x.name]));
   let cur = null;
@@ -3019,8 +3091,11 @@ function maybeSendDailyRecap() {
   if (getSetting('last_recap_date', '') === todayStr) return;
   const hour = Number(getSetting('recap_hour', '18'));
   if (new Date().getHours() < hour) return;
-  const newHomework = db.prepare("SELECT * FROM homework WHERE date(created_at)=date('now','localtime') OR date(updated_at)=date('now','localtime')").all();
-  const newNotes = db.prepare("SELECT * FROM school_notes WHERE date(created_at)=date('now','localtime')").all();
+  // « Aujourd'hui » = depuis minuit, heure locale du serveur ; created_at/updated_at sont en UTC (datetime('now')).
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  const sinceUtc = midnight.toISOString().slice(0, 19).replace('T', ' ');
+  const newHomework = db.prepare('SELECT * FROM homework WHERE created_at>=? OR updated_at>=?').all(sinceUtc, sinceUtc);
+  const newNotes = db.prepare('SELECT * FROM school_notes WHERE created_at>=?').all(sinceUtc);
   if (newHomework.length || newNotes.length) {
     const childName = (id) => { const c = db.prepare('SELECT name FROM children WHERE id=?').get(id); return c ? c.name : '?'; };
     for (const u of db.prepare('SELECT * FROM users WHERE homework_recap=1').all()) {

@@ -19,6 +19,10 @@ RUN mkdir -p /data /media && chown -R node:node /data /media /app
 USER node
 
 ENV NODE_ENV=production
+# Fuseau horaire de l'application : les rappels (récap de 18 h, jeudi 19 h…), « aujourd'hui » et les heures du
+# journal d'audit s'entendent en heure locale. Sans cette ligne, un conteneur tourne en UTC (1 à 2 h de décalage
+# en France). Pour un autre fuseau : variable TZ dans docker-compose.yml.
+ENV TZ=Europe/Paris
 ENV PORT=3000
 ENV DATA_DIR=/data
 VOLUME ["/data", "/media"]

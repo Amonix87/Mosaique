@@ -1842,6 +1842,68 @@ async function main() {
     }
     assert.ok(/script-src 'self'/.test((await anon.call('GET', '/vendor/pdfjs/pdf.min.mjs')).headers.get('content-security-policy') || ''), 'la CSP reste stricte');
 
+    // ── Revue complète : droits, validations et cascades ──────────────────────────────────────────
+    // Enfant réservé à Alice et Bob : Carla ne le voit pas, et ne peut donc ni le modifier, ni le voir dans son agenda iCal.
+    const kidR = (await alice.post('/api/children', { name: 'Rémi', color: '#123456', parent_ids: [A, B] })).body.id;
+    ok(await carla.put(`/api/children/${kidR}`, { name: 'Piraté' }), 403, "Carla ne voit pas Rémi : elle ne peut pas le modifier");
+    ok(await bob.put(`/api/children/${kidR}`, { allergies: 'arachides' }), 200, 'un parent désigné peut modifier son enfant');
+    ok(await bob.put(`/api/children/${kidR}`, { name: 'Rémi B', handover_time: '99:99' }), 400, 'heure invalide refusée');
+    assert.strictEqual((await alice.get('/api/me')).body.children.find((c) => c.id === kidR).name, 'Rémi', 'modification refusée = rien d\'enregistré (tout ou rien)');
+    ok(await bob.put(`/api/children/${kidR}`, { name: '  ' }), 400, 'prénom vide refusé');
+    ok(await alice.put('/api/children/999999', { name: 'x' }), 404, 'enfant inexistant');
+    const secretEv = (await alice.post('/api/events', { circle_id: circle, title: 'RDV orthophoniste Rémi', starts_at: '2026-12-02T10:00', child_ids: [kidR] })).body;
+    ok(await alice.put('/api/custody', { date_from: '2026-12-01', date_to: '2026-12-03', child_ids: [kidR], parent_id: A }));
+    const rep = (await alice.post('/api/events', { circle_id: circle, title: 'Natation', starts_at: '2026-12-01T08:00', repeat: 'daily', repeat_until: '2026-12-10', child_ids: [] })).body;
+    ok(await alice.post(`/api/events/${rep.id}/exclude`, { date: '2026-12-03' }));
+    const carlaIcs2 = await (await fetch(`${BASE}/ical/${carlaMe.user.ical_token}.ics`)).text();
+    assert.ok(!carlaIcs2.includes('orthophoniste'), "l'iCal de Carla ne contient pas l'événement d'un enfant qu'elle ne voit pas");
+    assert.ok(!carlaIcs2.includes('Rémi chez'), "…ni sa garde");
+    assert.ok(carlaIcs2.includes('SUMMARY:Natation'), 'les événements sans enfant restent visibles');
+    const aliceIcs2 = await (await fetch(`${BASE}/ical/${me.user.ical_token}.ics`)).text();
+    assert.ok(aliceIcs2.includes('orthophoniste') && aliceIcs2.includes('Rémi chez'), 'Alice, parent, les voit');
+    assert.ok(aliceIcs2.includes('RRULE:FREQ=DAILY;UNTIL=20261210T235959'), "fin de série inclusive (et non le lendemain)");
+    assert.ok(aliceIcs2.includes('EXDATE:20261203T080000'), 'une occurrence supprimée est exclue de la série (EXDATE)');
+    assert.ok(secretEv.id > 0);
+    // Événements : on ne peut pas, à la modification, contourner les contrôles de la création.
+    ok(await alice.put(`/api/events/${rep.id}`, { ends_at: '2026-11-30T09:00' }), 400, 'fin avant le début refusée à la modification');
+    ok(await alice.put(`/api/events/${rep.id}`, { reminder_minutes: -5 }), 400, 'rappel négatif refusé');
+    ok(await alice.put(`/api/events/${rep.id}`, { reminder_minutes: 60 }), 200, 'rappel valide accepté');
+    // Dépenses : payeur et partage dans le cercle de la dépense (c2 = Alice seule).
+    ok(await alice.post('/api/expenses', { circle_id: c2, title: 'Hors cercle', amount_cents: 1000, date: '2026-11-01', paid_by: C, split: { [A]: 50, [C]: 50 } }), 400, 'payeur hors du cercle refusé');
+    ok(await alice.post('/api/expenses', { circle_id: c2, title: 'Partage hors cercle', amount_cents: 1000, date: '2026-11-01', paid_by: A, split: { [A]: 50, [C]: 50 } }), 400, 'partage hors du cercle refusé');
+    const okExp = (await alice.post('/api/expenses', { circle_id: c2, title: 'Dans le cercle', amount_cents: 1000, date: '2026-11-01', paid_by: A, split: { [A]: 100 } })).body;
+    ok(await alice.put(`/api/expenses/${okExp.id}`, { paid_by: C }), 400, 'changer le payeur pour quelqu\'un hors du cercle refusé');
+    ok(await alice.put(`/api/expenses/${okExp.id}`, { title: 'Renommée' }), 200, 'le reste reste modifiable');
+    // Facture payée : sa suppression suit la règle de la dépense (son créateur seul).
+    const invImp = await anon.call('POST', `/import/${schoolToken}/facture`, { circle_id: circle, label: 'Périscolaire', number: 'REV-1', date: '2026-11-02', amount_cents: 4200, external_id: 'rev-1' });
+    const revInvId = invImp.body.results[0].id;
+    ok(await alice.put(`/api/invoices/${revInvId}/assign`, { assigned_to: A, paid: true, date: '2026-11-03' }), 200, 'facture marquée payée par Alice');
+    ok(await bob.del(`/api/invoices/${revInvId}`), 403, "Bob ne peut pas supprimer la facture payée par Alice (donc sa dépense)");
+    ok(await alice.del(`/api/invoices/${revInvId}`), 200, 'son créateur le peut');
+    // Retirer un membre : jamais une suppression silencieuse de ses données.
+    const danInv = (await alice.post('/api/invites', { name: 'Dan', circle_ids: [circle] })).body;
+    const dan = new Client();
+    ok(await dan.post(`/api/invites/${danInv.token}/accept`, { email: 'dan@ex.fr', password: 'motdepasse4' }));
+    const kidD = (await alice.post('/api/children', { name: 'Dora', color: '#abcdef', parent_ids: [A, danInv.user_id] })).body.id;
+    const danExp = (await dan.post('/api/expenses', { circle_id: circle, title: 'Payé par Dan', amount_cents: 3000, date: '2026-11-04', paid_by: danInv.user_id, split: { [A]: 50, [danInv.user_id]: 50 } })).body;
+    const refused = await alice.del(`/api/users/${danInv.user_id}`);
+    ok(refused, 409, 'retirer un membre qui a des dépenses demande confirmation');
+    assert.strictEqual(refused.body.footprint.expenses, 1, 'le détail de ce qui disparaîtrait est donné');
+    assert.ok((await alice.get('/api/expenses')).body.some((e) => e.id === danExp.id), 'rien n\'a été supprimé tant que ce n\'est pas confirmé');
+    ok(await bob.del(`/api/users/${danInv.user_id}?force=1`), 403, 'réservé aux administrateurs');
+    ok(await alice.del(`/api/users/${danInv.user_id}?force=1`), 200, 'confirmé : le membre est retiré');
+    assert.ok(!(await alice.get('/api/expenses')).body.some((e) => e.id === danExp.id), 'ses dépenses partent avec lui (annoncé)');
+    assert.deepStrictEqual((await alice.get('/api/me')).body.children.find((c) => c.id === kidD).parent_ids, [A], 'il n\'est plus parent désigné (pas d\'identifiant orphelin)');
+    const ghostInv = (await alice.post('/api/invites', { name: 'Eve', circle_ids: [circle] })).body;
+    ok(await alice.del(`/api/users/${ghostInv.user_id}`), 200, 'annuler une invitation sans donnée : direct');
+    // Changer de mot de passe déconnecte les autres appareils.
+    const bob2 = new Client();
+    ok(await bob2.post('/api/login', { email: 'bob@ex.fr', password: 'motdepasse2' }));
+    ok(await bob2.get('/api/me'), 200, 'deuxième appareil connecté');
+    ok(await bob.put('/api/me', { current_password: 'motdepasse2', new_password: 'motdepasse2bis' }), 200, 'mot de passe changé');
+    ok(await bob2.get('/api/me'), 401, "l'autre appareil doit se reconnecter");
+    ok(await bob.get('/api/me'), 200, 'l\'appareil courant reste connecté');
+
     // Installabilité PWA (icône sur l'écran d'accueil, ouverture en plein écran)
     const manifestRes = await fetch(`${BASE}/manifest.webmanifest`);
     assert.strictEqual(manifestRes.status, 200);
